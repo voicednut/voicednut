@@ -1,0 +1,52 @@
+{
+  "name": "bot",
+  "version": "2.0.0",
+  "description": "AI-powered voice calling bot with Mini App interface",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "start:webapp": "node server/webapp.js",
+    "start:all": "concurrently \"npm run start\" \"npm run start:webapp\"",
+    "dev": "concurrently \"nodemon bot.js\" \"nodemon server/webapp.js\"",
+    "dev:bot": "nodemon bot.js",
+    "dev:webapp": "nodemon server/webapp.js",
+    "deploy:vercel": "vercel --prod --confirm",
+    "deploy:preview": "vercel",
+    "deploy:setup": "node scripts/setup-vercel.js",
+    "logs:vercel": "vercel logs",
+    "env:pull": "vercel env pull .env.local",
+    "env:list": "vercel env ls",
+    "test:miniapp": "node scripts/test-miniapp.js",
+    "validate:config": "node scripts/validate-config.js"
+  },
+  "dependencies": {
+    "@grammyjs/conversations": "^1.2.0",
+    "axios": "^1.6.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "grammy": "^1.21.1",
+    "sqlite3": "^5.1.6"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "nodemon": "^3.0.2",
+    "vercel": "^41.0.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "keywords": [
+    "telegram-bot",
+    "voice-calls",
+    "ai",
+    "miniapp",
+    "sms"
+  ],
+  "author": "Tunde Ednut",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ednutlabs/voicednut.git"
+  }
+}
