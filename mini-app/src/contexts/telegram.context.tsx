@@ -1,13 +1,6 @@
 import { useEffect } from 'react';
 import { create } from 'zustand';
-import {
-  themeParams,
-  initData,
-  viewport,
-  miniApp,
-  backButton,
-  type ThemeParams,
-} from '@tma.js/sdk-react';
+import { themeParams, initData, viewport, type ThemeParams } from '@tma.js/sdk-react';
 
 // Make sure window.Telegram type is available
 import '../types/telegram-window';
@@ -104,46 +97,6 @@ export const useTelegramStore = create<TelegramState>((set) => ({
     }
   },
 }));
-
-function safeInvoke(label: string, fn: () => unknown): void {
-  try {
-    const result = fn();
-    if (result && typeof (result as { catch?: unknown }) === 'object') {
-      const maybePromise = result as { catch?: unknown };
-      if (typeof maybePromise.catch === 'function') {
-        (maybePromise.catch as (onRejected: (error: unknown) => void) => void)((error) => {
-          console.warn(`[telegram] ${label} failed`, error);
-        });
-        return;
-      }
-    }
-    if (result instanceof Promise) {
-      result.catch((error) => {
-        console.warn(`[telegram] ${label} failed`, error);
-      });
-    }
-  } catch (error) {
-    console.warn(`[telegram] ${label} failed`, error);
-  }
-}
-
-export function initializeTelegram(): void {
-  // Mount all required components
-  safeInvoke('backButton.mount.ifAvailable', () => backButton.mount.ifAvailable());
-  safeInvoke('initData.restore', () => initData.restore());
-  applyThemeToDocument(defaultThemeParams);
-
-  if (miniApp.mount.isAvailable()) {
-    safeInvoke('themeParams.mount', () => themeParams.mount());
-    safeInvoke('miniApp.mount', () => miniApp.mount());
-    safeInvoke('themeParams.bindCssVars', () => themeParams.bindCssVars());
-  }
-
-  if (viewport.mount.isAvailable()) {
-    safeInvoke('viewport.mount', () => viewport.mount());
-    safeInvoke('viewport.bindCssVars', () => viewport.bindCssVars());
-  }
-}
 
 export function useTelegramFeatures() {
   const { setThemeParams, setViewportHeight, setViewportStableHeight } = useTelegramStore();

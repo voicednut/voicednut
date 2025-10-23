@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
+import { config } from '@/services/config';
 import { useCallStore } from '../stores/callStore';
 import { type Call } from '../types/call';
 
@@ -22,11 +23,7 @@ export const useWebSocketConnection = (isMonitoringActive: boolean): Socket | nu
 
     // Only create new connection if we don't have one
     if (!socketRef.current) {
-      const apiUrl =
-        typeof import.meta.env.VITE_API_URL === 'string'
-          ? import.meta.env.VITE_API_URL
-          : 'http://localhost:3000';
-      socketRef.current = io(apiUrl, {
+      socketRef.current = io(config.api.baseUrl, {
         transports: ['websocket'],
         autoConnect: true,
       });

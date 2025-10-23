@@ -65,7 +65,7 @@ graph TB
 1. **Clone the repository**
    
    ```bash
-   git clone https://github.com/ednutlabs/voicednut.git
+   git clone https://github.com/voicednut/voicednut.git
    cd voicednut
    ```
 1. **Set up API Server**
@@ -126,7 +126,10 @@ TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
 ADMIN_TELEGRAM_ID=123456789
 ADMIN_TELEGRAM_USERNAME=your_username
-API_BASE=http://localhost:3000
+API_URL=http://localhost:3000
+MINI_APP_URL=https://voicednut-mini.vercel.app
+WEB_APP_SECRET=super-secret-shared-key
+WEB_APP_PORT=8080
 ```
 
 ## 📖 API Documentation

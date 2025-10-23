@@ -1,10 +1,14 @@
-require('dotenv').config();
 require('colors');
 
 const express = require('express');
 const ExpressWs = require('express-ws');
+const compression = require('compression');
+const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const path = require('path');
 
+const { server: serverConfig, twilio: twilioConfig } = require('./config');
 const { EnhancedGptService } = require('./routes/gpt');
 const { StreamService } = require('./routes/stream');
 const { TranscriptionService } = require('./routes/transcription');
@@ -20,10 +24,37 @@ const VoiceResponse = require('twilio').twiml.VoiceResponse;
 const app = express();
 ExpressWs(app);
 
-app.use(express.json());
+app.set('trust proxy', 1);
+
+const corsOptions =
+  serverConfig.corsOrigins.length > 0
+    ? { origin: serverConfig.corsOrigins, credentials: true }
+    : { origin: true, credentials: true };
+
+const apiRateLimiter = rateLimit({
+  windowMs: serverConfig.rateLimit.windowMs,
+  max: serverConfig.rateLimit.max,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(compression());
+app.use(cors(corsOptions));
+app.use(apiRateLimiter);
+
+app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-const PORT = process.env.PORT || 3000;
+const PORT = serverConfig.port;
+const publicHost = serverConfig.hostname;
+const publicHttpBase = publicHost ? `https://${publicHost}` : `http://localhost:${PORT}`;
+const publicWsBase = publicHost ? `wss://${publicHost}` : `ws://localhost:${PORT}`;
+const {
+  accountSid: twilioAccountSid,
+  authToken: twilioAuthToken,
+  fromNumber: twilioFromNumber,
+} = twilioConfig;
 
 // Enhanced call configurations with function context
 const callConfigurations = new Map();
@@ -340,6 +371,24 @@ app.ws('/connection', (ws) => {
 
     ws.on('close', () => {
       console.log(`🔌 WebSocket connection closed for adaptive call: ${callSid || 'unknown'}`.yellow);
+
+      if (callSid) {
+        if (callConfigurations.has(callSid)) {
+          callConfigurations.delete(callSid);
+        }
+        if (callFunctionSystems.has(callSid)) {
+          callFunctionSystems.delete(callSid);
+        }
+      }
+
+      const session = callSid ? activeCalls.get(callSid) : undefined;
+      if (callSid && session) {
+        activeCalls.delete(callSid);
+        const startedAt = session.startTime || callStartTime || new Date();
+        void handleCallEnd(callSid, startedAt).catch((error) => {
+          console.error('Error completing call on close event:', error);
+        });
+      }
     });
 
   } catch (err) {
@@ -460,7 +509,7 @@ app.post('/incoming', (req, res) => {
   try {
     const response = new VoiceResponse();
     const connect = response.connect();
-    connect.stream({ url: `wss://${process.env.SERVER}/connection` });
+    connect.stream({ url: `${publicWsBase}/connection` });
 
     res.type('text/xml');
     res.end(response.toString());
@@ -487,8 +536,8 @@ app.post('/outbound-call', async (req, res) => {
       });
     }
 
-    const accountSid = process.env.TWILIO_ACCOUNT_SID;
-    const authToken = process.env.TWILIO_AUTH_TOKEN;
+    const accountSid = twilioAccountSid;
+    const authToken = twilioAuthToken;
     
     if (!accountSid || !authToken) {
       return res.status(500).json({
@@ -507,10 +556,10 @@ app.post('/outbound-call', async (req, res) => {
 
     // Create the outbound call with enhanced callbacks
     const call = await client.calls.create({
-      url: `https://${process.env.SERVER}/incoming`,
+      url: `${publicHttpBase}/incoming`,
       to: number,
-      from: process.env.FROM_NUMBER,
-      statusCallback: `https://${process.env.SERVER}/webhook/call-status`,
+      from: twilioFromNumber,
+      statusCallback: `${publicHttpBase}/webhook/call-status`,
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed', 'busy', 'no-answer', 'canceled', 'failed'],
       statusCallbackMethod: 'POST'
     });
@@ -2628,9 +2677,9 @@ app.get('/api/sms/health', async (req, res) => {
 
         // Check Twilio connectivity (basic check)
         try {
-            if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
+            if (twilioAccountSid && twilioAuthToken) {
                 health.services.twilio.status = 'configured';
-                health.services.twilio.account_sid = process.env.TWILIO_ACCOUNT_SID.substring(0, 8) + '...';
+                health.services.twilio.account_sid = `${twilioAccountSid.substring(0, 8)}...`;
             } else {
                 health.services.twilio.status = 'not_configured';
                 health.status = 'degraded';

@@ -1,5 +1,6 @@
 import { io, Socket } from 'socket.io-client';
 import { create } from 'zustand';
+import { config } from '@/services/config';
 import { type Call } from '../types/call';
 
 interface WebSocketEvents {
@@ -19,8 +20,7 @@ export const useWebSocket = create<WebSocketState>((set) => ({
   socket: null,
   connected: false,
   connect: () => {
-    const url = (import.meta.env.VITE_WS_URL ?? 'http://localhost:3000') as string;
-    const newSocket = io(url, {
+    const newSocket = io(config.api.wsUrl, {
       transports: ['websocket'],
       autoConnect: true,
     });

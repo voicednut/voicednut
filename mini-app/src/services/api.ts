@@ -6,11 +6,10 @@ import {
   type SingleUserAPIResponse,
   type ConfigAPIResponse,
 } from '../types/api';
-
-const API_BASE_URL = (import.meta.env.VITE_API_URL ?? 'http://localhost:3000') as string;
+import { config } from '@/services/config';
 
 export const api = axios.create({
-  baseURL: API_BASE_URL,
+  baseURL: config.api.baseUrl,
   headers: {
     'Content-Type': 'application/json',
   },

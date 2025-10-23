@@ -5,14 +5,11 @@ import { useEffect } from 'react';
 import { WebSocketProvider } from '../contexts/WebSocketContext';
 import { CallMonitorProvider } from '../contexts/CallMonitorContext';
 import { useWebSocket } from '../services/websocket';
-import { useTelegramFeatures, initializeTelegram } from '../contexts/telegram.context';
+import { useTelegramFeatures } from '../contexts/telegram.context';
 
 import { IndexPage } from '@/pages/IndexPage/IndexPage';
 import { CallsPage } from '@/pages/calls/CallsPage';
 import { TranscriptsPage } from '@/pages/TranscriptsPage/TranscriptsPage';
-
-// Initialize telegram features
-void initializeTelegram();
 
 function AppContent() {
   const lp = useLaunchParams();
