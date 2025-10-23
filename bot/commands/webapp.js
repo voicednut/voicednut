@@ -37,7 +37,7 @@ function validateWebAppData(rawInitData) {
 }
 
 module.exports = (bot) => {
-  // Handle data from WebApp
+  // Handle data from Mini App
   bot.on('message:web_app_data', async (ctx) => {
     try {
       const { web_app_data } = ctx.message;
