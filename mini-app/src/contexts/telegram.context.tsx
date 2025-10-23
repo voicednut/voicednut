@@ -105,21 +105,43 @@ export const useTelegramStore = create<TelegramState>((set) => ({
   },
 }));
 
+function safeInvoke(label: string, fn: () => unknown): void {
+  try {
+    const result = fn();
+    if (result && typeof (result as { catch?: unknown }) === 'object') {
+      const maybePromise = result as { catch?: unknown };
+      if (typeof maybePromise.catch === 'function') {
+        (maybePromise.catch as (onRejected: (error: unknown) => void) => void)((error) => {
+          console.warn(`[telegram] ${label} failed`, error);
+        });
+        return;
+      }
+    }
+    if (result instanceof Promise) {
+      result.catch((error) => {
+        console.warn(`[telegram] ${label} failed`, error);
+      });
+    }
+  } catch (error) {
+    console.warn(`[telegram] ${label} failed`, error);
+  }
+}
+
 export function initializeTelegram(): void {
   // Mount all required components
-  void backButton.mount.ifAvailable();
-  void initData.restore();
+  safeInvoke('backButton.mount.ifAvailable', () => backButton.mount.ifAvailable());
+  safeInvoke('initData.restore', () => initData.restore());
   applyThemeToDocument(defaultThemeParams);
 
   if (miniApp.mount.isAvailable()) {
-    void themeParams.mount();
-    void miniApp.mount();
-    void themeParams.bindCssVars();
+    safeInvoke('themeParams.mount', () => themeParams.mount());
+    safeInvoke('miniApp.mount', () => miniApp.mount());
+    safeInvoke('themeParams.bindCssVars', () => themeParams.bindCssVars());
   }
 
   if (viewport.mount.isAvailable()) {
-    void viewport.mount();
-    void viewport.bindCssVars();
+    safeInvoke('viewport.mount', () => viewport.mount());
+    safeInvoke('viewport.bindCssVars', () => viewport.bindCssVars());
   }
 }
 

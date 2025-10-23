@@ -1,5 +1,6 @@
 const { InlineKeyboard } = require('grammy');
 const { getUser, isAdmin } = require('../db/db');
+const config = require('../config');
 
 module.exports = (bot) => {
     // Menu command
@@ -13,19 +14,22 @@ module.exports = (bot) => {
 
             const isOwner = await new Promise(r => isAdmin(ctx.from.id, r));
             
-            const kb = new InlineKeyboard()
-        .webApp('📱 Open Mini App', process.env.MINI_APP_URL)
-        .row()
-        .text('📞 New Call', 'CALL')
-        .text('📱 Send SMS', 'SMS')
-        .row()
-        .text('📋 Recent Calls', 'CALLS')
-        .text('💬 SMS Stats', 'SMS_STATS')
-        .row()
-        .text('🏥 Health Check', 'HEALTH')
-        .text('ℹ️ Help', 'HELP')
-        .row()
-        .text('📚 Guide', 'GUIDE');
+            const kb = new InlineKeyboard();
+
+            if (config.miniAppUrl) {
+                kb.webApp('📱 Open Mini App', config.miniAppUrl).row();
+            }
+
+            kb.text('📞 New Call', 'CALL')
+            .text('📱 Send SMS', 'SMS')
+            .row()
+            .text('📋 Recent Calls', 'CALLS')
+            .text('💬 SMS Stats', 'SMS_STATS')
+            .row()
+            .text('🏥 Health Check', 'HEALTH')
+            .text('ℹ️ Help', 'HELP')
+            .row()
+            .text('📚 Guide', 'GUIDE');
 
             if (isOwner) {
                 kb.row()

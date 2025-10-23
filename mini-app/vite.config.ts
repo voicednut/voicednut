@@ -3,9 +3,11 @@ import { defineConfig } from 'vite';
 import mkcert from 'vite-plugin-mkcert';
 import tsconfigPaths from 'vite-tsconfig-paths';
 
+const base = process.env.VITE_APP_BASE?.trim() || '/';
+
 // https://vitejs.dev/config/
 export default defineConfig({
-  base: '/reactjs-template/',
+  base,
   css: {
     preprocessorOptions: {
       scss: {

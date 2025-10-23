@@ -59,17 +59,49 @@ export async function init(options: {
   }
 
   // Mount all components used in the project.
-  backButton.mount.ifAvailable();
-  initData.restore();
+  try {
+    backButton.mount.ifAvailable();
+  } catch (error) {
+    console.warn('[init] Failed to mount back button', error);
+  }
+
+  try {
+    initData.restore();
+  } catch (error) {
+    console.warn('[init] Failed to restore init data', error);
+  }
 
   if (miniApp.mount.isAvailable()) {
-    themeParams.mount();
-    miniApp.mount();
-    themeParams.bindCssVars();
+    try {
+      themeParams.mount();
+    } catch (error) {
+      console.warn('[init] Failed to mount theme params', error);
+    }
+
+    try {
+      miniApp.mount();
+    } catch (error) {
+      console.warn('[init] Failed to mount mini app', error);
+    }
+
+    try {
+      themeParams.bindCssVars();
+    } catch (error) {
+      console.warn('[init] Failed to bind theme params CSS variables', error);
+    }
   }
 
   if (viewport.mount.isAvailable()) {
-    await viewport.mount();
-    viewport.bindCssVars();
+    try {
+      await viewport.mount();
+    } catch (error) {
+      console.warn('[init] Failed to mount viewport', error);
+    }
+
+    try {
+      viewport.bindCssVars();
+    } catch (error) {
+      console.warn('[init] Failed to bind viewport CSS variables', error);
+    }
   }
 }
