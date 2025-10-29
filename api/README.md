@@ -15,6 +15,17 @@ Features:
 - ❗️ Allows the user to interrupt the GPT assistant and ask a different question.
 - 📔 Maintains chat history with GPT.
 - 🛠️ Allows the GPT to call external tools.
+- 🎭 Persona composer tailors tone, mood, and phrasing across business domains, channels, and urgency levels.
+
+## Adaptive Persona and Mood Profiles
+
+The API ships with a persona composer that inspects call metadata (business domain, purpose, channel, urgency, and mood signals) and produces the appropriate system prompt and greeting. Editable templates live in:
+
+- `api/config/business.js` – domain-specific copy, channel/purpose openers, and capability hints.
+- `api/config/personalityTemplates.js` – mood, urgency, and channel tone guides.
+- `api/services/PersonaComposer.js` – combines the templates and removes voice-only cues when switching to SMS or alerts.
+
+Voice calls and SMS conversations automatically fall back to the default adaptive prompt when no persona is supplied, so free-form prompts continue to work as before.
 
 ## Setting up for Development
 

@@ -3,6 +3,11 @@ const EventEmitter = require('events');
 const OpenAI = require('openai');
 const PersonalityEngine = require('../functions/PersonalityEngine');
 
+const DEFAULT_SYSTEM_PROMPT =
+  'You are an intelligent AI assistant capable of adapting to different business contexts and customer needs. Be professional, helpful, and responsive to customer communication styles. You must add a \'•\' symbol every 5 to 10 words at natural pauses where your response can be split for text to speech.';
+
+const DEFAULT_FIRST_MESSAGE = 'Hello! How can I assist you today?';
+
 class EnhancedGptService extends EventEmitter {
   constructor(customPrompt = null, customFirstMessage = null) {
     super();
@@ -26,12 +31,9 @@ class EnhancedGptService extends EventEmitter {
     this.dynamicTools = [];
     this.availableFunctions = {};
     
-    const defaultPrompt = 'You are an intelligent AI assistant capable of adapting to different business contexts and customer needs. Be professional, helpful, and responsive to customer communication styles. You must add a \'•\' symbol every 5 to 10 words at natural pauses where your response can be split for text to speech.';
-    const defaultFirstMessage = 'Hello! How can I assist you today?';
-
     // Use custom prompt if provided, otherwise use default
-    this.baseSystemPrompt = customPrompt || defaultPrompt;
-    const firstMessage = customFirstMessage || defaultFirstMessage;
+    this.baseSystemPrompt = customPrompt || DEFAULT_SYSTEM_PROMPT;
+    const firstMessage = customFirstMessage || DEFAULT_FIRST_MESSAGE;
 
     // Initialize conversation with adaptive prompt
     this.userContext = [
@@ -69,6 +71,16 @@ class EnhancedGptService extends EventEmitter {
   setCallSid(callSid) {
     this.callSid = callSid;
     this.userContext.push({ 'role': 'system', 'content': `callSid: ${callSid}` });
+  }
+
+  // Provide persona metadata for context-aware responses
+  setPersonaMetadata(metadata) {
+    if (!metadata) return;
+    this.personaMetadata = metadata;
+    this.userContext.push({
+      role: 'system',
+      content: `persona_profile: ${JSON.stringify(metadata)}`
+    });
   }
 
   // Get current personality and adaptation info
@@ -466,4 +478,8 @@ class EnhancedGptService extends EventEmitter {
   }
 }
 
-module.exports = { EnhancedGptService };
+module.exports = {
+  EnhancedGptService,
+  DEFAULT_SYSTEM_PROMPT,
+  DEFAULT_FIRST_MESSAGE
+};
