@@ -41,10 +41,16 @@ bot.catch((err) => {
 // Import dependencies
 const { getUser, isAdmin, expireInactiveUsers } = require('./db/db');
 const { callFlow, registerCallCommand } = require('./commands/call');
-const { addUserFlow, registerAddUserCommand } = require('./commands/adduser');
-const { promoteFlow, registerPromoteCommand } = require('./commands/promote');
-const { removeUserFlow, registerRemoveUserCommand } = require('./commands/removeuser');
 const { smsFlow, bulkSmsFlow, scheduleSmsFlow, registerSmsCommands } = require('./commands/sms');
+const {
+    addUserFlow,
+    registerAddUserCommand,
+    promoteFlow,
+    registerPromoteCommand,
+    removeUserFlow,
+    registerRemoveUserCommand,
+    registerUserListCommand
+} = require('./commands/users');
 
 // Register conversations with error handling
 bot.use(wrapConversation(callFlow, "call-conversation"));
@@ -61,10 +67,10 @@ registerAddUserCommand(bot);
 registerPromoteCommand(bot);
 registerRemoveUserCommand(bot);
 registerSmsCommands(bot);
+registerUserListCommand(bot);
 
 
 // Register non-conversation commands
-require('./commands/users')(bot);
 require('./commands/help')(bot);
 require('./commands/menu')(bot);
 require('./commands/guide')(bot);

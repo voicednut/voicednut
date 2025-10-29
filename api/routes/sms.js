@@ -1,5 +1,6 @@
 const EventEmitter = require('events');
 const axios = require('axios');
+const PersonaComposer = require('../services/PersonaComposer');
 
 class EnhancedSmsService extends EventEmitter {
     constructor() {
@@ -21,6 +22,73 @@ class EnhancedSmsService extends EventEmitter {
         // SMS conversation tracking
         this.activeConversations = new Map();
         this.messageQueue = new Map(); // Queue for outbound messages
+        this.personaComposer = new PersonaComposer();
+        this.defaultSmsPersona = {
+            businessId: process.env.DEFAULT_SMS_BUSINESS_ID || null,
+            purpose: 'customer_service',
+            channel: 'sms',
+            emotion: 'neutral',
+            urgency: 'normal',
+            technicalLevel: 'general'
+        };
+    }
+
+    updateDefaultPersona(options = {}) {
+        this.defaultSmsPersona = {
+            ...this.defaultSmsPersona,
+            ...options
+        };
+    }
+
+    analyzeTone(message) {
+        const text = (message || '').toLowerCase();
+        let emotion = 'neutral';
+        let urgency = 'normal';
+        let technicalLevel = 'general';
+
+        if (/(urgent|asap|immediately|right now|emergency|critical)/.test(text)) {
+            emotion = 'urgent';
+            urgency = 'high';
+        } else if (/(frustrated|angry|annoyed|upset|mad|furious|disappointed)/.test(text)) {
+            emotion = 'frustrated';
+        } else if (/(confused|don't understand|lost|unclear|explain)/.test(text)) {
+            emotion = 'confused';
+        } else if (/(thanks|thank you|appreciate|great)/.test(text)) {
+            emotion = 'positive';
+        }
+
+        if (/(security|fraud|breach|locked|hack)/.test(text)) {
+            urgency = 'critical';
+        } else if (/(deadline|due today|late fee)/.test(text)) {
+            urgency = 'high';
+        }
+
+        if (/(stack trace|exception|deployment|api|server|database|config)/.test(text)) {
+            technicalLevel = 'advanced';
+        } else if (/(setup|install|how do i|step by step)/.test(text)) {
+            technicalLevel = 'novice';
+        }
+
+        return { emotion, urgency, technicalLevel };
+    }
+
+    composeConversationContext(conversation, toneOverrides = {}) {
+        const personaOptions = {
+            ...(conversation.personaProfile || this.defaultSmsPersona),
+            ...toneOverrides,
+            channel: 'sms'
+        };
+
+        const composition = this.personaComposer.compose(personaOptions);
+        conversation.context = composition.systemPrompt;
+        conversation.persona = composition.metadata;
+        conversation.personaProfile = {
+            businessId: composition.metadata.businessId,
+            purpose: composition.metadata.purpose,
+            emotion: composition.metadata.emotion,
+            urgency: composition.metadata.urgency,
+            technicalLevel: composition.metadata.technicalLevel
+        };
     }
 
     // Send individual SMS
@@ -119,9 +187,11 @@ class EnhancedSmsService extends EventEmitter {
                     messages: [],
                     context: `You are a helpful SMS assistant. Keep responses concise (under 160 chars when possible). Be friendly and professional.`,
                     created_at: new Date(),
-                    last_activity: new Date()
+                    last_activity: new Date(),
+                    personaProfile: { ...this.defaultSmsPersona }
                 };
                 this.activeConversations.set(from, conversation);
+                this.composeConversationContext(conversation);
             }
 
             // Add incoming message to conversation
@@ -132,6 +202,9 @@ class EnhancedSmsService extends EventEmitter {
                 message_sid: messageSid
             });
             conversation.last_activity = new Date();
+
+            const tone = this.analyzeTone(body);
+            this.composeConversationContext(conversation, tone);
 
             // Generate AI response
             const aiResponse = await this.generateAIResponse(conversation);

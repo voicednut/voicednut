@@ -9,7 +9,8 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 
 const { server: serverConfig, twilio: twilioConfig } = require('./config');
-const { EnhancedGptService } = require('./routes/gpt');
+const { EnhancedGptService, DEFAULT_SYSTEM_PROMPT, DEFAULT_FIRST_MESSAGE } = require('./routes/gpt');
+const { getBusinessProfile } = require('./config/business');
 const { StreamService } = require('./routes/stream');
 const { TranscriptionService } = require('./routes/transcription');
 const { TextToSpeechService } = require('./routes/tts');
@@ -18,6 +19,7 @@ const { EnhancedSmsService } = require('./routes/sms.js');
 const Database = require('./db/db');
 const { webhookService } = require('./routes/status');
 const DynamicFunctionEngine = require('./functions/DynamicFunctionEngine');
+const PersonaComposer = require('./services/PersonaComposer');
 
 const VoiceResponse = require('twilio').twiml.VoiceResponse;
 
@@ -64,6 +66,7 @@ const callFunctionSystems = new Map(); // Store generated functions per call
 let db;
 const functionEngine = new DynamicFunctionEngine();
 const smsService = new EnhancedSmsService();
+const personaComposer = new PersonaComposer();
 
 async function startServer() {
   try {
@@ -161,7 +164,9 @@ app.ws('/connection', (ws) => {
             console.log(`🔧 Available functions: ${Object.keys(functionSystem.implementations).join(', ')}`.cyan);
             
             // Initialize Enhanced GPT service with dynamic functions
-            gptService = new EnhancedGptService(callConfig.prompt, callConfig.first_message);
+            const promptOverride = callConfig.promptOverride ?? null;
+            const firstMessageOverride = callConfig.firstMessageOverride ?? null;
+            gptService = new EnhancedGptService(promptOverride, firstMessageOverride);
             
             // Inject the dynamic function system
             gptService.setDynamicFunctions(functionSystem.functions, functionSystem.implementations);
@@ -173,6 +178,9 @@ app.ws('/connection', (ws) => {
           }
           
           gptService.setCallSid(callSid);
+          if (callConfig?.persona_metadata) {
+            gptService.setPersonaMetadata(callConfig.persona_metadata);
+          }
 
           // Set up GPT reply handler with personality tracking
           gptService.on('gptreply', async (gptReply, icount) => {
@@ -235,7 +243,7 @@ app.ws('/connection', (ws) => {
             
             const firstMessage = callConfig ? 
               callConfig.first_message : 
-              'Hello! what\'s your name and how can i help you today?';
+              DEFAULT_FIRST_MESSAGE;
             
             console.log(`🗣️ First message (${functionSystem?.context.industry || 'default'}): ${firstMessage.substring(0, 50)}...`.magenta);
             
@@ -264,7 +272,7 @@ app.ws('/connection', (ws) => {
             
             const firstMessage = callConfig ? 
               callConfig.first_message : 
-              'Hello! what\'s your name and how can i help you today?';
+              DEFAULT_FIRST_MESSAGE;
             
             try {
               await db.addTranscript({
@@ -522,11 +530,31 @@ app.post('/incoming', (req, res) => {
 // Enhanced outbound call endpoint with dynamic function generation
 app.post('/outbound-call', async (req, res) => {
   try {
-    const { number, prompt, first_message, user_chat_id } = req.body;
+    const {
+      number,
+      prompt,
+      first_message,
+      user_chat_id,
+      business_id,
+      purpose,
+      channel: rawChannel,
+      emotion,
+      urgency,
+      technical_level: technicalLevel
+    } = req.body;
 
-    if (!number || !prompt || !first_message) {
+    if (!number) {
       return res.status(400).json({
-        error: 'Missing required fields: number, prompt, and first_message are required'
+        error: 'Missing required field: number'
+      });
+    }
+
+    const accountSid = twilioAccountSid;
+    const authToken = twilioAuthToken;
+
+    if (!accountSid || !authToken) {
+      return res.status(500).json({
+        error: 'Twilio credentials not configured'
       });
     }
 
@@ -536,20 +564,72 @@ app.post('/outbound-call', async (req, res) => {
       });
     }
 
-    const accountSid = twilioAccountSid;
-    const authToken = twilioAuthToken;
-    
-    if (!accountSid || !authToken) {
-      return res.status(500).json({
-        error: 'Twilio credentials not configured'
+    let businessProfile = null;
+    if (business_id) {
+      businessProfile = getBusinessProfile(business_id);
+      if (!businessProfile) {
+        return res.status(400).json({
+          error: `Unknown business_id "${business_id}"`
+        });
+      }
+    }
+
+    const normalizeKey = (value, fallback) =>
+      (value || fallback || '')
+        .toString()
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, '_');
+
+    const channel = normalizeKey(rawChannel, 'voice');
+    const normalizedPurpose = normalizeKey(purpose, 'general');
+    const normalizedEmotion = normalizeKey(emotion, businessProfile?.purposes?.[normalizedPurpose]?.recommendedEmotion || 'neutral');
+    const normalizedUrgency = normalizeKey(urgency, businessProfile?.purposes?.[normalizedPurpose]?.defaultUrgency || 'normal');
+    const normalizedTechnicalLevel = normalizeKey(technicalLevel, 'general');
+
+    const personaOptions = {
+      businessId: businessProfile?.id || null,
+      customPrompt: prompt || null,
+      customFirstMessage: first_message || null,
+      purpose: normalizedPurpose,
+      channel,
+      emotion: normalizedEmotion,
+      urgency: normalizedUrgency,
+      technicalLevel: normalizedTechnicalLevel
+    };
+
+    const shouldCompose =
+      personaOptions.businessId ||
+      !prompt ||
+      !first_message ||
+      personaOptions.purpose !== 'general' ||
+      personaOptions.channel !== 'voice' ||
+      personaOptions.emotion !== 'neutral' ||
+      personaOptions.urgency !== 'normal' ||
+      personaOptions.technicalLevel !== 'general';
+
+    let composition = null;
+    if (shouldCompose) {
+      composition = personaComposer.compose(personaOptions);
+    }
+
+    let selectedPrompt = composition ? composition.systemPrompt : (prompt || (businessProfile ? businessProfile.prompt : null));
+    let selectedFirstMessage = composition ? composition.firstMessage : (first_message || (businessProfile ? businessProfile.firstMessage : null));
+
+    if (!selectedPrompt || !selectedFirstMessage) {
+      return res.status(400).json({
+        error: 'Provide prompt and first_message or supply a supported business_id'
       });
     }
 
+    const usingDefaultPrompt = selectedPrompt === DEFAULT_SYSTEM_PROMPT;
+    const usingDefaultFirstMessage = selectedFirstMessage === DEFAULT_FIRST_MESSAGE;
+
     console.log('🔧 Generating adaptive function system for call...'.blue);
-    
+
     // Generate dynamic functions based on the prompt
-    const functionSystem = functionEngine.generateAdaptiveFunctionSystem(prompt, first_message);
-    
+    const functionSystem = functionEngine.generateAdaptiveFunctionSystem(selectedPrompt, selectedFirstMessage);
+
     console.log(`✅ Generated ${functionSystem.functions.length} functions for ${functionSystem.context.industry} industry`.green);
 
     const client = require('twilio')(accountSid, authToken);
@@ -564,29 +644,46 @@ app.post('/outbound-call', async (req, res) => {
       statusCallbackMethod: 'POST'
     });
 
+    const promptSource = composition
+      ? 'persona_composer'
+      : businessProfile
+        ? (usingDefaultPrompt && usingDefaultFirstMessage ? 'business_profile_default' : 'business_profile_custom')
+        : (usingDefaultPrompt && usingDefaultFirstMessage ? 'default' : 'custom');
+
     const callConfig = {
-      prompt: prompt,
-      first_message: first_message,
+      prompt: selectedPrompt,
+      first_message: selectedFirstMessage,
+      promptOverride: usingDefaultPrompt ? null : selectedPrompt,
+      firstMessageOverride: usingDefaultFirstMessage ? null : selectedFirstMessage,
       created_at: new Date().toISOString(),
       user_chat_id: user_chat_id,
       business_context: functionSystem.context,
-      function_count: functionSystem.functions.length
+      business_id: businessProfile ? businessProfile.id : null,
+      business_display_name: businessProfile ? businessProfile.displayName : null,
+      function_count: functionSystem.functions.length,
+      prompt_source: promptSource,
+      persona_metadata: composition ? composition.metadata : null
     };
-    
+
     callConfigurations.set(call.sid, callConfig);
-    
+
     // Store the generated function system for this call
     callFunctionSystems.set(call.sid, functionSystem);
 
     // Save call to database with enhanced metadata
     try {
+      const businessContextRecord = {
+        ...functionSystem.context,
+        persona: composition ? composition.metadata : null
+      };
+
       await db.createCall({
         call_sid: call.sid,
         phone_number: number,
-        prompt: prompt,
-        first_message: first_message,
+        prompt: selectedPrompt,
+        first_message: selectedFirstMessage,
         user_chat_id: user_chat_id,
-        business_context: JSON.stringify(functionSystem.context),
+        business_context: JSON.stringify(businessContextRecord),
         generated_functions: JSON.stringify(functionSystem.functions.map(f => f.function.name))
       });
 
@@ -597,6 +694,10 @@ app.post('/outbound-call', async (req, res) => {
 
       console.log(`📞 Enhanced adaptive call created: ${call.sid} to ${number}`.green);
       console.log(`🎯 Business context: ${functionSystem.context.industry} - ${functionSystem.context.businessType}`.cyan);
+      console.log(`🧾 Prompt source: ${promptSource}${businessProfile ? ` (${businessProfile.displayName})` : ''}`.cyan);
+      if (composition?.metadata) {
+        console.log(`🧬 Persona metadata: ${JSON.stringify(composition.metadata)}`.gray);
+      }
       
     } catch (dbError) {
       console.error('Database error:', dbError);
@@ -608,9 +709,13 @@ app.post('/outbound-call', async (req, res) => {
       to: number,
       status: call.status,
       business_context: functionSystem.context,
+      business_id: businessProfile ? businessProfile.id : null,
+      business_display_name: businessProfile ? businessProfile.displayName : null,
+      prompt_source: promptSource,
       generated_functions: functionSystem.functions.length,
       function_types: functionSystem.functions.map(f => f.function.name),
-      enhanced_webhooks: true
+      enhanced_webhooks: true,
+      persona: composition ? composition.metadata : null
     });
 
   } catch (error) {
