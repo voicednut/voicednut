@@ -164,8 +164,8 @@ class EnhancedWebhookService {
           
         case 'in-progress':
         case 'answered':
-          emoji = '✅';
-          message = 'Call answered - In progress';
+          emoji = '☎️';
+          message = 'In progress';
           callTiming.answered = new Date();
           // Calculate ring duration
           if (callTiming.ringing) {

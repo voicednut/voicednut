@@ -72,11 +72,24 @@ class EnhancedSmsService extends EventEmitter {
         return { emotion, urgency, technicalLevel };
     }
 
-    composeConversationContext(conversation, toneOverrides = {}) {
+    composeConversationContext(conversation, overrides = {}) {
+        const normalized = { ...overrides };
+
+        if (normalized.business_id && !normalized.businessId) {
+            normalized.businessId = normalized.business_id;
+        }
+        if (normalized.purpose_id && !normalized.purpose) {
+            normalized.purpose = normalized.purpose_id;
+        }
+        if (normalized.technical_level && !normalized.technicalLevel) {
+            normalized.technicalLevel = normalized.technical_level;
+        }
+
+        normalized.channel = 'sms';
+
         const personaOptions = {
             ...(conversation.personaProfile || this.defaultSmsPersona),
-            ...toneOverrides,
-            channel: 'sms'
+            ...normalized
         };
 
         const composition = this.personaComposer.compose(personaOptions);
@@ -92,12 +105,28 @@ class EnhancedSmsService extends EventEmitter {
     }
 
     // Send individual SMS
-    async sendSMS(to, message, from = null) {
+    async sendSMS(to, message, from = null, personaOverrides = null) {
         try {
             const fromNumber = from || process.env.FROM_NUMBER;
 
             if (!fromNumber) {
                 throw new Error('No FROM_NUMBER configured for SMS');
+            }
+
+            let conversation = this.activeConversations.get(to);
+            if (!conversation) {
+                conversation = {
+                    phone: to,
+                    messages: [],
+                    created_at: new Date(),
+                    last_activity: new Date(),
+                    personaProfile: { ...this.defaultSmsPersona }
+                };
+                this.activeConversations.set(to, conversation);
+            }
+
+            if (personaOverrides || !conversation.context) {
+                this.composeConversationContext(conversation, personaOverrides || {});
             }
 
             console.log(`📱 Sending SMS to ${to}: ${message.substring(0, 50)}...`);
@@ -110,13 +139,23 @@ class EnhancedSmsService extends EventEmitter {
             });
 
             console.log(`✅ SMS sent successfully: ${smsMessage.sid}`);
+
+            conversation.messages.push({
+                role: 'assistant',
+                content: message,
+                timestamp: new Date(),
+                message_sid: smsMessage.sid
+            });
+            conversation.last_activity = new Date();
+
             return {
                 success: true,
                 message_sid: smsMessage.sid,
                 to: to,
                 from: fromNumber,
                 body: message,
-                status: smsMessage.status
+                status: smsMessage.status,
+                persona: conversation.persona
             };
         } catch (error) {
             console.error('❌ SMS sending error:', error);

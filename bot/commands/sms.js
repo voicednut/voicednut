@@ -1,6 +1,14 @@
 const config = require('../config');
 const axios = require('axios');
 const { getUser, isAdmin } = require('../db/db');
+const {
+    BUSINESS_OPTIONS,
+    MOOD_OPTIONS,
+    URGENCY_OPTIONS,
+    TECH_LEVEL_OPTIONS,
+    askOptionWithButtons,
+    getOptionLabel
+} = require('../utils/persona');
 
 // Simple phone number validation
 function isValidPhoneNumber(number) {
@@ -21,6 +29,113 @@ async function smsFlow(conversation, ctx) {
             return ctx.reply('❌ Invalid phone number format. Use E.164 format: +1234567890');
         }
 
+        const selectedBusiness = await askOptionWithButtons(
+            conversation,
+            ctx,
+            `🎭 *Select SMS persona:*
+Choose the business profile for this message.`,
+            BUSINESS_OPTIONS,
+            {
+                prefix: 'sms-persona',
+                columns: 2,
+                formatLabel: (option) => option.custom ? '✍️ Custom Message' : option.label
+            }
+        );
+
+        const payload = {
+            to: number,
+            user_chat_id: ctx.from.id.toString()
+        };
+
+        const personaSummary = [];
+        let selectedPurpose = null;
+        let recommendedEmotion = 'neutral';
+        let recommendedUrgency = 'normal';
+
+        if (!selectedBusiness.custom) {
+            payload.business_id = selectedBusiness.id;
+            payload.channel = 'sms';
+
+            const availablePurposes = selectedBusiness.purposes || [];
+            selectedPurpose = availablePurposes.find((p) => p.id === selectedBusiness.defaultPurpose) || availablePurposes[0];
+
+            if (availablePurposes.length > 1) {
+                selectedPurpose = await askOptionWithButtons(
+                    conversation,
+                    ctx,
+                    `🎯 *Choose message purpose:*
+This helps set tone and urgency automatically.`,
+                    availablePurposes,
+                    {
+                        prefix: 'sms-purpose',
+                        columns: 1,
+                        formatLabel: (option) => `${option.emoji || '•'} ${option.label}`
+                    }
+                );
+            }
+
+            selectedPurpose = selectedPurpose || availablePurposes[0];
+            recommendedEmotion = selectedPurpose?.defaultEmotion || 'neutral';
+            recommendedUrgency = selectedPurpose?.defaultUrgency || 'normal';
+
+            if (selectedPurpose?.id && selectedPurpose.id !== 'general') {
+                payload.purpose = selectedPurpose.id;
+            }
+
+            const moodSelection = await askOptionWithButtons(
+                conversation,
+                ctx,
+                `🎙️ *Tone preference*
+Recommended: *${getOptionLabel(MOOD_OPTIONS, recommendedEmotion)}*.`,
+                MOOD_OPTIONS,
+                { prefix: 'sms-tone', columns: 2 }
+            );
+
+            if (moodSelection.id !== 'auto') {
+                payload.emotion = moodSelection.id;
+                personaSummary.push(`Tone: ${moodSelection.label}`);
+            } else {
+                personaSummary.push(`Tone: ${moodSelection.label} (${getOptionLabel(MOOD_OPTIONS, recommendedEmotion)})`);
+            }
+
+            const urgencySelection = await askOptionWithButtons(
+                conversation,
+                ctx,
+                `⏱️ *Urgency level*
+Recommended: *${getOptionLabel(URGENCY_OPTIONS, recommendedUrgency)}*.`,
+                URGENCY_OPTIONS,
+                { prefix: 'sms-urgency', columns: 2 }
+            );
+
+            if (urgencySelection.id !== 'auto') {
+                payload.urgency = urgencySelection.id;
+                personaSummary.push(`Urgency: ${urgencySelection.label}`);
+            } else {
+                personaSummary.push(`Urgency: ${urgencySelection.label} (${getOptionLabel(URGENCY_OPTIONS, recommendedUrgency)})`);
+            }
+
+            const techSelection = await askOptionWithButtons(
+                conversation,
+                ctx,
+                `🧠 *Recipient technical level:*
+How comfortable is the recipient with technical details?`,
+                TECH_LEVEL_OPTIONS,
+                { prefix: 'sms-tech', columns: 2 }
+            );
+
+            if (techSelection.id !== 'auto') {
+                payload.technical_level = techSelection.id;
+                personaSummary.push(`Technical level: ${techSelection.label}`);
+            } else {
+                personaSummary.push(`Technical level: ${getOptionLabel(TECH_LEVEL_OPTIONS, 'general')}`);
+            }
+
+            personaSummary.unshift(`Persona: ${selectedBusiness.label}`);
+            if (selectedPurpose?.label) {
+                personaSummary.splice(1, 0, `Purpose: ${selectedPurpose.label}`);
+            }
+        }
+
         await ctx.reply('💬 Enter the SMS message (max 1600 characters):');
         const msgContent = await conversation.wait();
         const message = msgContent?.message?.text?.trim();
@@ -30,22 +145,26 @@ async function smsFlow(conversation, ctx) {
             return ctx.reply('❌ Message too long. SMS messages must be under 1600 characters.');
         }
 
-        const confirmText =
-            `📱 *SMS Details:*\n\n` +
-            `📞 To: ${number}\n` +
-            `💬 Message: ${message.substring(0, 100)}${message.length > 100 ? '...' : ''}\n` +
-            `📏 Length: ${message.length} characters\n\n` +
-            `⏳ Sending SMS...`;
+        const summaryLines = [
+            '📱 *SMS Details:*',
+            '',
+            `📞 To: ${number}`,
+            `💬 Message: ${message.substring(0, 100)}${message.length > 100 ? '...' : ''}`,
+            `📏 Length: ${message.length} characters`,
+        ];
 
-        await ctx.reply(confirmText, { parse_mode: 'Markdown' });
+        if (personaSummary.length > 0) {
+            summaryLines.push('', ...personaSummary.map((line) => `• ${line}`));
+        }
 
-        const payload = {
-            to: number,
-            message: message,
-            user_chat_id: ctx.from.id.toString()
-        };
+        summaryLines.push('', '⏳ Sending SMS...');
 
-        const response = await axios.post(`${config.apiUrl}/api/sms/send`, payload, {
+        await ctx.reply(summaryLines.join('\n'), { parse_mode: 'Markdown' });
+
+        const response = await axios.post(`${config.apiUrl}/api/sms/send`, {
+            ...payload,
+            message,
+        }, {
             headers: { 'Content-Type': 'application/json' },
             timeout: 30000
         });
