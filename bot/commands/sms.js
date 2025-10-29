@@ -10,6 +10,38 @@ const {
     getOptionLabel
 } = require('../utils/persona');
 
+const TEMPLATE_METADATA = {
+    welcome: { label: 'Welcome Message', description: 'Friendly greeting for new contacts' },
+    appointment_reminder: { label: 'Appointment Reminder', description: 'Notify about upcoming appointments' },
+    verification: { label: 'Verification Code', description: 'Send one-time verification codes' },
+    order_update: { label: 'Order Update', description: 'Inform customers about order status' },
+    payment_reminder: { label: 'Payment Reminder', description: 'Prompt users about pending payments' },
+    promotional: { label: 'Promotional Offer', description: 'Broadcast limited-time promotions' },
+    customer_service: { label: 'Customer Service', description: 'Acknowledge support inquiries' },
+    survey: { label: 'Feedback Survey', description: 'Request post-interaction feedback' }
+};
+
+const CUSTOM_TEMPLATE_OPTION = {
+    id: 'custom',
+    label: '✍️ Custom message',
+    description: 'Write your own SMS text'
+};
+
+function buildTemplateOption(templateId) {
+    const meta = TEMPLATE_METADATA[templateId] || {};
+    const label = meta.label || templateId.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    return {
+        id: templateId,
+        label,
+        description: meta.description || 'Predefined SMS template'
+    };
+}
+
+function extractTemplateVariables(templateText = '') {
+    const matches = templateText.match(/\{(\w+)\}/g) || [];
+    return Array.from(new Set(matches.map((token) => token.replace(/[{}]/g, ''))));
+}
+
 // Simple phone number validation
 function isValidPhoneNumber(number) {
     const e164Regex = /^\+[1-9]\d{1,14}$/;
@@ -51,6 +83,10 @@ Choose the business profile for this message.`,
         let selectedPurpose = null;
         let recommendedEmotion = 'neutral';
         let recommendedUrgency = 'normal';
+        let templateSelection = null;
+        let templateName = null;
+        let templateVariables = {};
+        let message = '';
 
         if (!selectedBusiness.custom) {
             payload.business_id = selectedBusiness.id;
@@ -136,13 +172,109 @@ How comfortable is the recipient with technical details?`,
             }
         }
 
-        await ctx.reply('💬 Enter the SMS message (max 1600 characters):');
-        const msgContent = await conversation.wait();
-        const message = msgContent?.message?.text?.trim();
+        // Fetch available templates
+        let templateChoices = [];
+        try {
+            const templateResponse = await axios.get(`${config.apiUrl}/api/sms/templates`);
+            const templateNames = templateResponse.data.available_templates || [];
+            templateChoices = templateNames.map(buildTemplateOption);
+        } catch (templateError) {
+            console.error('❌ Failed to fetch SMS templates:', templateError);
+            templateChoices = Object.keys(TEMPLATE_METADATA).map(buildTemplateOption);
+        }
 
-        if (!message) return ctx.reply('❌ Please provide a message.');
+        templateChoices.push(CUSTOM_TEMPLATE_OPTION);
+
+        const templateListText = templateChoices
+            .map((option) => `• ${option.label}${option.description ? ` – ${option.description}` : ''}`)
+            .join('\n');
+
+        const templatePrompt = `📝 *Choose SMS template:*
+${templateListText}
+
+Tap an option below to continue.`;
+
+        templateSelection = await askOptionWithButtons(
+            conversation,
+            ctx,
+            templatePrompt,
+            templateChoices,
+            { prefix: 'sms-template', columns: 1, formatLabel: (option) => option.label }
+        );
+
+        if (templateSelection.id === 'custom') {
+            await ctx.reply('💬 Enter the SMS message (max 1600 characters):');
+            const msgContent = await conversation.wait();
+            message = msgContent?.message?.text?.trim();
+
+            if (!message) return ctx.reply('❌ Please provide a message.');
+            if (message.length > 1600) {
+                return ctx.reply('❌ Message too long. SMS messages must be under 1600 characters.');
+            }
+            personaSummary.push('Template: Custom message');
+        } else {
+            templateName = templateSelection.id;
+
+            try {
+                const templateResponse = await axios.get(`${config.apiUrl}/api/sms/templates/${templateName}`);
+                let templateText = templateResponse.data.template;
+                const originalTemplate = templateResponse.data.original_template || templateText;
+                const placeholders = extractTemplateVariables(originalTemplate);
+
+                if (placeholders.length > 0) {
+                    await ctx.reply('🧩 This template includes placeholders. Provide values or type skip to leave them unchanged.');
+
+                    for (const token of placeholders) {
+                        await ctx.reply(`✏️ Enter value for *${token}* (type skip to leave as is):`, { parse_mode: 'Markdown' });
+                        const valueMsg = await conversation.wait();
+                        const value = valueMsg?.message?.text?.trim();
+
+                        if (value && value.toLowerCase() !== 'skip') {
+                            templateVariables[token] = value;
+                        }
+                    }
+
+                    for (const [token, value] of Object.entries(templateVariables)) {
+                        templateText = templateText.replace(new RegExp(`{${token}}`, 'g'), value);
+                    }
+                }
+
+                message = templateText;
+                payload.template_name = templateName;
+                personaSummary.push(`Template: ${templateSelection.label}`);
+                if (Object.keys(templateVariables).length > 0) {
+                    personaSummary.push(`Filled variables: ${Object.keys(templateVariables).join(', ')}`);
+                }
+            } catch (templateFetchError) {
+                console.error('❌ Failed to load template content:', templateFetchError);
+                await ctx.reply('⚠️ Could not load the selected template. Please type a custom message instead.');
+
+                await ctx.reply('💬 Enter the SMS message (max 1600 characters):');
+                const msgContent = await conversation.wait();
+                message = msgContent?.message?.text?.trim();
+
+                if (!message) return ctx.reply('❌ Please provide a message.');
+                if (message.length > 1600) {
+                    return ctx.reply('❌ Message too long. SMS messages must be under 1600 characters.');
+                }
+                personaSummary.push('Template: Custom message (fallback)');
+            }
+        }
+
+        if (!message) {
+            return ctx.reply('❌ Unable to generate an SMS message. Please try again.');
+        }
+
         if (message.length > 1600) {
-            return ctx.reply('❌ Message too long. SMS messages must be under 1600 characters.');
+            return ctx.reply(`❌ Message too long (${message.length} characters). Please shorten it below 1600 characters.`);
+        }
+
+        if (templateName) {
+            payload.template_name = templateName;
+        }
+
+        if (Object.keys(templateVariables).length > 0) {
+            payload.template_variables = templateVariables;
         }
 
         const summaryLines = [
@@ -184,6 +316,9 @@ How comfortable is the recipient with technical details?`,
         }
     } catch (error) {
         console.error('SMS send error:', error);
+        if (error.response) {
+            console.error('SMS send error response data:', error.response.data);
+        }
         let errorMsg = '❌ *SMS Failed*\n\n';
 
         if (error.response) {
