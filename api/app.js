@@ -1810,7 +1810,18 @@ app.post('/webhook/sms-status', async (req, res) => {
 // Send single SMS endpoint
 app.post('/api/sms/send', async (req, res) => {
     try {
-        const { to, message, from, user_chat_id } = req.body;
+        const {
+            to,
+            message,
+            from,
+            user_chat_id,
+            business_id,
+            purpose,
+            emotion,
+            urgency,
+            technical_level,
+            channel
+        } = req.body;
 
         if (!to || !message) {
             return res.status(400).json({
@@ -1827,7 +1838,22 @@ app.post('/api/sms/send', async (req, res) => {
             });
         }
 
-        const result = await smsService.sendSMS(to, message, from);
+        const personaOverrides = {};
+        if (business_id) personaOverrides.business_id = business_id;
+        if (purpose) personaOverrides.purpose = purpose;
+        if (emotion) personaOverrides.emotion = emotion;
+        if (urgency) personaOverrides.urgency = urgency;
+        if (technical_level) personaOverrides.technical_level = technical_level;
+        if (channel) personaOverrides.channel = channel;
+
+        const hasPersonaOverrides = Object.keys(personaOverrides).length > 0;
+
+        const result = await smsService.sendSMS(
+            to,
+            message,
+            from,
+            hasPersonaOverrides ? personaOverrides : null
+        );
 
         // Save to database
         if (db) {
