@@ -1,5 +1,6 @@
 const config = require('../config');
 const axios = require('axios');
+const { InlineKeyboard } = require('grammy');
 const { getUser } = require('../db/db');
 
 const BUSINESS_OPTIONS = [
@@ -96,23 +97,42 @@ const TECH_LEVEL_OPTIONS = [
 
 // Simple phone number validation to match E.164 format
 function isValidPhoneNumber(number) {
-    // Basic E.164 validation: starts with + followed by 1-15 digits
     const e164Regex = /^\+[1-9]\d{1,14}$/;
-    return e164Regex.test(number.trim());
+    return e164Regex.test((number || '').trim());
 }
 
-function parseNumericSelection(text, optionsLength) {
-    const choice = parseInt((text || '').trim(), 10);
-    if (Number.isNaN(choice) || choice < 1 || choice > optionsLength) {
-        return null;
+function formatOptionLabel(option) {
+    if (option.emoji) {
+        return `${option.emoji} ${option.label}`;
     }
-    return choice - 1;
+    return option.label;
 }
 
-function buildOptionsMessage(options) {
-    return options
-        .map((option, idx) => `${idx + 1}. ${option.label}${option.description ? ` – ${option.description}` : ''}`)
-        .join('\n');
+function getOptionLabel(options, id) {
+    const match = options.find((option) => option.id === id);
+    return match ? match.label : id;
+}
+
+async function askOptionWithButtons(conversation, ctx, prompt, options, { prefix, columns = 2, formatLabel } = {}) {
+    const keyboard = new InlineKeyboard();
+    options.forEach((option, index) => {
+        const label = formatLabel ? formatLabel(option) : formatOptionLabel(option);
+        keyboard.text(label, `${prefix}:${option.id}`);
+        if ((index + 1) % columns === 0) {
+            keyboard.row();
+        }
+    });
+
+    const message = await ctx.reply(prompt, { parse_mode: 'Markdown', reply_markup: keyboard });
+    const selectionCtx = await conversation.waitFor('callback_query:data', (callbackCtx) => {
+        return callbackCtx.callbackQuery.data.startsWith(`${prefix}:`);
+    });
+
+    await selectionCtx.answerCallbackQuery();
+    await ctx.api.editMessageReplyMarkup(message.chat.id, message.message_id).catch(() => {});
+
+    const selectedId = selectionCtx.callbackQuery.data.split(':')[1];
+    return options.find((option) => option.id === selectedId);
 }
 
 async function callFlow(conversation, ctx) {
@@ -137,20 +157,18 @@ async function callFlow(conversation, ctx) {
             return ctx.reply('❌ Invalid phone number format. Use E.164 format: +16125151442');
         }
 
-        // Step 2: Select business/persona type
-        const businessOptionsMessage =
-            '🎭 *Select service type / persona:*\n\n' +
-            buildOptionsMessage(BUSINESS_OPTIONS) +
-            '\n\nReply with the number of your choice.';
-        await ctx.reply(businessOptionsMessage, { parse_mode: 'Markdown' });
-
-        const businessMsg = await conversation.wait();
-        const businessSelectionIdx = parseNumericSelection(businessMsg?.message?.text, BUSINESS_OPTIONS.length);
-        if (businessSelectionIdx === null) {
-            return ctx.reply('❌ Invalid selection. Please start again and reply with the number of your choice.');
-        }
-
-        const selectedBusiness = BUSINESS_OPTIONS[businessSelectionIdx];
+        // Step 2: Select business/persona type with buttons
+        const selectedBusiness = await askOptionWithButtons(
+            conversation,
+            ctx,
+            '🎭 *Select service type / persona:*\nTap the option that best matches this call.',
+            BUSINESS_OPTIONS,
+            {
+                prefix: 'persona',
+                columns: 2,
+                formatLabel: (option) => option.custom ? '✍️ Custom Prompt' : option.label
+            }
+        );
 
         let payload = {
             number: number,
@@ -193,18 +211,20 @@ async function callFlow(conversation, ctx) {
             let selectedPurpose = availablePurposes.find(p => p.id === selectedBusiness.defaultPurpose) || availablePurposes[0];
 
             if (availablePurposes.length > 1) {
-                const purposeOptionsMessage =
-                    '🎯 *Select call purpose:*\n\n' +
-                    availablePurposes.map((option, idx) => `${idx + 1}. ${option.emoji || '•'} ${option.label}`).join('\n') +
-                    '\n\nReply with the number of your choice.';
-                await ctx.reply(purposeOptionsMessage, { parse_mode: 'Markdown' });
-
-                const purposeMsg = await conversation.wait();
-                const purposeIdx = parseNumericSelection(purposeMsg?.message?.text, availablePurposes.length);
-                if (purposeIdx !== null) {
-                    selectedPurpose = availablePurposes[purposeIdx];
-                }
+                selectedPurpose = await askOptionWithButtons(
+                    conversation,
+                    ctx,
+                    '🎯 *Select call purpose:*\nChoose the specific workflow for this call.',
+                    availablePurposes,
+                    {
+                        prefix: 'purpose',
+                        columns: 1,
+                        formatLabel: (option) => `${option.emoji || '•'} ${option.label}`
+                    }
+                );
             }
+
+            selectedPurpose = selectedPurpose || availablePurposes[0];
 
             purposeId = selectedPurpose?.id || selectedBusiness.defaultPurpose || 'general';
             if (purposeId && purposeId !== 'general') {
@@ -213,62 +233,65 @@ async function callFlow(conversation, ctx) {
 
             // Tone (emotion) selection
             const recommendedEmotion = selectedPurpose?.defaultEmotion || 'neutral';
-            const moodOptionsMessage =
-                '🎙️ *Tone preference:*\n\n' +
-                MOOD_OPTIONS.map((option, idx) => `${idx + 1}. ${option.label}`).join('\n') +
-                `\n\nRecommended: ${recommendedEmotion}. Reply with the number or choose Auto.`;
-            await ctx.reply(moodOptionsMessage, { parse_mode: 'Markdown' });
-
-            const moodMsg = await conversation.wait();
-            const moodIdx = parseNumericSelection(moodMsg?.message?.text, MOOD_OPTIONS.length);
-            const moodSelection = moodIdx !== null ? MOOD_OPTIONS[moodIdx] : MOOD_OPTIONS[0];
+            const moodSelection = await askOptionWithButtons(
+                conversation,
+                ctx,
+                `🎙️ *Tone preference*\nRecommended: *${recommendedEmotion}*.`,
+                MOOD_OPTIONS,
+                { prefix: 'tone', columns: 2 }
+            );
             if (moodSelection.id !== 'auto') {
                 emotion = moodSelection.id;
-                payload.emotion = emotion;
+                payload.emotion = moodSelection.id;
             } else {
                 emotion = recommendedEmotion;
             }
 
             // Urgency preference
             const recommendedUrgency = selectedPurpose?.defaultUrgency || 'normal';
-            const urgencyOptionsMessage =
-                '⏱️ *Urgency level:*\n\n' +
-                URGENCY_OPTIONS.map((option, idx) => `${idx + 1}. ${option.label}`).join('\n') +
-                `\n\nRecommended: ${recommendedUrgency}. Reply with the number or choose Auto.`;
-            await ctx.reply(urgencyOptionsMessage, { parse_mode: 'Markdown' });
-
-            const urgencyMsg = await conversation.wait();
-            const urgencyIdx = parseNumericSelection(urgencyMsg?.message?.text, URGENCY_OPTIONS.length);
-            const urgencySelection = urgencyIdx !== null ? URGENCY_OPTIONS[urgencyIdx] : URGENCY_OPTIONS[0];
+            const urgencySelection = await askOptionWithButtons(
+                conversation,
+                ctx,
+                `⏱️ *Urgency level*\nRecommended: *${recommendedUrgency}*.`,
+                URGENCY_OPTIONS,
+                { prefix: 'urgency', columns: 2 }
+            );
             if (urgencySelection.id !== 'auto') {
                 urgency = urgencySelection.id;
-                payload.urgency = urgency;
+                payload.urgency = urgencySelection.id;
             } else {
                 urgency = recommendedUrgency;
             }
 
             // Technical comfort level
-            const techOptionsMessage =
-                '🧠 *Caller technical level:*\n\n' +
-                TECH_LEVEL_OPTIONS.map((option, idx) => `${idx + 1}. ${option.label}`).join('\n') +
-                '\n\nReply with the number of your choice.';
-            await ctx.reply(techOptionsMessage, { parse_mode: 'Markdown' });
-
-            const techMsg = await conversation.wait();
-            const techIdx = parseNumericSelection(techMsg?.message?.text, TECH_LEVEL_OPTIONS.length);
-            const techSelection = techIdx !== null ? TECH_LEVEL_OPTIONS[techIdx] : TECH_LEVEL_OPTIONS[0];
+            const techSelection = await askOptionWithButtons(
+                conversation,
+                ctx,
+                '🧠 *Caller technical level*\nHow comfortable is the caller with technical details?',
+                TECH_LEVEL_OPTIONS,
+                { prefix: 'tech', columns: 2 }
+            );
+            technicalLevel = techSelection.id === 'auto' ? 'general' : techSelection.id;
             if (techSelection.id !== 'auto') {
-                technicalLevel = techSelection.id;
                 payload.technical_level = technicalLevel;
-            } else {
-                technicalLevel = 'general';
             }
 
             personaSummary.push(`Persona: ${selectedBusiness.label}`);
             personaSummary.push(`Purpose: ${selectedPurpose?.label || 'General assistance'}`);
-            personaSummary.push(`Tone: ${emotion}`);
-            personaSummary.push(`Urgency: ${urgency}`);
-            personaSummary.push(`Technical level: ${technicalLevel}`);
+
+            const toneSummary = moodSelection.id === 'auto'
+                ? `${moodSelection.label} (${getOptionLabel(MOOD_OPTIONS, recommendedEmotion)})`
+                : moodSelection.label;
+            const urgencySummary = urgencySelection.id === 'auto'
+                ? `${urgencySelection.label} (${getOptionLabel(URGENCY_OPTIONS, recommendedUrgency)})`
+                : urgencySelection.label;
+            const techSummary = techSelection.id === 'auto'
+                ? getOptionLabel(TECH_LEVEL_OPTIONS, 'general')
+                : techSelection.label;
+
+            personaSummary.push(`Tone: ${toneSummary}`);
+            personaSummary.push(`Urgency: ${urgencySummary}`);
+            personaSummary.push(`Technical level: ${techSummary}`);
         }
 
         // Step 4: Confirmation summary
