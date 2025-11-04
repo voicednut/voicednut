@@ -697,61 +697,6 @@ async function getSmsStats(ctx) {
 }
 
 // FIXED: SMS templates - now properly handles the API response
-async function showSmsTemplates(ctx) {
-    try {
-        console.log('Fetching SMS templates...');
-        
-        const response = await axios.get(`${config.apiUrl}/api/sms/templates`, { timeout: 10000 });
-        
-        if (response.data.success && response.data.available_templates) {
-            const templates = response.data.available_templates;
-            
-            let templatesText = `📝 *Available SMS Templates*\n\n`;
-            
-            templates.forEach((template, index) => {
-                const displayName = template.replace(/_/g, ' ').toUpperCase();
-                templatesText += `${index + 1}. ${displayName}\n`;
-            });
-            templatesText +=
-                `\n💡 *How to use templates:*\n` +
-                `• Use /smstemplate <name> to see template content\n` +
-                `• Example: /smstemplate welcome\n` +
-                `• Example: /smstemplate verification\n\n` +
-                `**Available templates:**\n` +
-                `• welcome - Welcome message for new users\n` +
-                `• appointment_reminder - Appointment reminders\n` +
-                `• verification - Verification codes\n` +
-                `• order_update - Order status updates\n` +
-                `• payment_reminder - Payment reminders\n` +
-                `• promotional - Promotional offers\n` +
-                `• customer_service - Customer service responses\n` +
-                `• survey - Customer satisfaction surveys`;
-            
-            await ctx.reply(templatesText, { parse_mode: 'Markdown' });
-        } else {
-            await ctx.reply('❌ Failed to fetch SMS templates. API returned unexpected response.');
-        }
-    } catch (error) {
-        console.error('SMS templates error:', error);
-        
-        // Provide fallback template list
-        const fallbackText = 
-            `📝 *SMS Templates (Fallback List)*\n\n` +
-            `Service temporarily unavailable. Available templates:\n\n` +
-            `1. WELCOME\n` +
-            `2. APPOINTMENT REMINDER\n` +
-            `3. VERIFICATION\n` +
-            `4. ORDER UPDATE\n` +
-            `5. PAYMENT REMINDER\n` +
-            `6. PROMOTIONAL\n` +
-            `7. CUSTOMER SERVICE\n` +
-            `8. SURVEY\n\n` +
-            `Use /smstemplate <name> to view template content.`;
-            
-        await ctx.reply(fallbackText, { parse_mode: 'Markdown' });
-    }
-}
-
 // Register SMS command handlers with conversation flows
 function registerSmsCommands(bot) {
 
@@ -860,140 +805,7 @@ function registerSmsCommands(bot) {
         }
     });
 
-    // FIXED: SMS templates command
-    bot.command('smstemplates', async ctx => {
-        try {
-            const user = await new Promise(r => getUser(ctx.from.id, r));
-            if (!user) {
-                return ctx.reply('❌ You are not authorized to use this bot.');
-            }
-
-            const adminStatus = await new Promise(r => isAdmin(ctx.from.id, r));
-            if (!adminStatus) {
-                return ctx.reply('❌ This command is for administrators only.');
-            }
-            
-            await ctx.reply('📝 Fetching SMS templates...');
-            await showSmsTemplates(ctx);
-            
-        } catch (error) {
-            console.error('SMS templates command error:', error);
-            await ctx.reply('❌ Error fetching SMS templates. Please try again later.');
-        }
-    });
-
-    // FIXED: Individual template command
-    bot.command('smstemplate', async ctx => {
-        try {
-            const user = await new Promise(r => getUser(ctx.from.id, r));
-            if (!user) {
-                return ctx.reply('❌ You are not authorized to use this bot.');
-            }
-
-            const adminStatus = await new Promise(r => isAdmin(ctx.from.id, r));
-            if (!adminStatus) {
-                return ctx.reply('❌ This command is for administrators only.');
-            }
-            
-            const args = ctx.message.text.split(' ');
-            if (args.length < 2) {
-                return ctx.reply(
-                    '📝 *Usage:* `/smstemplate <template_name>`\n\n' +
-                    '**Examples:**\n' +
-                    '• `/smstemplate welcome`\n' +
-                    '• `/smstemplate verification`\n' +
-                    '• `/smstemplate order_update`\n\n' +
-                    '**Available templates:** welcome, appointment_reminder, verification, order_update, payment_reminder, promotional, customer_service, survey',
-                    { parse_mode: 'Markdown' }
-                );
-            }
-            
-            const templateName = args[1].trim().toLowerCase();
-            
-            // Sample variables for demonstration
-            const sampleVariables = {
-                date: '2024-12-25',
-                time: '14:30',
-                code: '123456',
-                amount: '$50.00',
-                order_id: 'ORD123456',
-                status: 'shipped',
-                tracking_url: 'https://track.example.com/123',
-                offer_text: '20% off your next purchase',
-                promo_code: 'SAVE20',
-                expiry_date: '2024-12-31',
-                phone: '+1-800-555-0123',
-                payment_url: 'https://pay.example.com/invoice123',
-                due_date: '2024-12-20'
-            };
-            
-            try {
-                const response = await axios.get(`${config.apiUrl}/api/sms/templates`, {
-                    params: { 
-                        template_name: templateName, 
-                        variables: JSON.stringify(sampleVariables) 
-                    },
-                    timeout: 10000
-                });
-                
-                if (response.data.success) {
-                    const templateText =
-                        `📝 *Template: ${templateName.toUpperCase().replace('_', ' ')}*\n\n` +
-                        `**Content:**\n` +
-                        `${response.data.template}\n\n` +
-                        `**Sample Variables Used:**\n` +
-                        `\`\`\`json\n${JSON.stringify(response.data.variables, null, 2)}\n\`\`\`\n\n` +
-                        `**Usage:** You can customize the variables when using this template in your SMS campaigns.`;
-                        
-                    await ctx.reply(templateText, { parse_mode: 'Markdown' });
-                } else {
-                    await ctx.reply(`❌ ${response.data.error || 'Template not found'}\n\nUse /smstemplates to see available templates.`);
-                }
-                
-            } catch (apiError) {
-                console.error('Template API error:', apiError);
-                
-                // Provide fallback templates
-                const fallbackTemplates = {
-                    welcome: 'Welcome to our service! We\'re excited to have you aboard. Reply HELP for assistance or STOP to unsubscribe.',
-                    appointment_reminder: 'Reminder: You have an appointment on {date} at {time}. Reply CONFIRM to confirm or RESCHEDULE to change.',
-                    verification: 'Your verification code is: {code}. This code will expire in 10 minutes. Do not share this code with anyone.',
-                    order_update: 'Order #{order_id} update: {status}. Track your order at {tracking_url}',
-                    payment_reminder: 'Payment reminder: Your payment of {amount} is due on {due_date}. Pay now: {payment_url}',
-                    promotional: '🎉 Special offer just for you! {offer_text} Use code {promo_code}. Valid until {expiry_date}. Reply STOP to opt out.',
-                    customer_service: 'Thanks for contacting us! We\'ve received your message and will respond within 24 hours. For urgent matters, call {phone}.',
-                    survey: 'How was your experience with us? Rate us 1-5 stars by replying with a number. Your feedback helps us improve!'
-                };
-                
-                if (fallbackTemplates[templateName]) {
-                    // Replace variables with sample data for display
-                    let templateContent = fallbackTemplates[templateName];
-                    Object.entries(sampleVariables).forEach(([key, value]) => {
-                        templateContent = templateContent.replace(new RegExp(`{${key}}`, 'g'), value);
-                    });
-                    
-                    const fallbackText =
-                        `📝 *Template: ${templateName.toUpperCase().replace('_', ' ')}* (Cached)\n\n` +
-                        `**Content:**\n${templateContent}\n\n` +
-                        `**Note:** This is a cached template. Live API temporarily unavailable.\n\n` +
-                        `**Original Template:**\n${fallbackTemplates[templateName]}`;
-                        
-                    await ctx.reply(fallbackText, { parse_mode: 'Markdown' });
-                } else {
-                    await ctx.reply(
-                        `❌ Template '${templateName}' not found.\n\n` +
-                        `**Available templates:**\n` +
-                        Object.keys(fallbackTemplates).join(', ') +
-                        `\n\nUse /smstemplates to see all templates.`
-                    );
-                }
-            }
-            
-        } catch (error) {
-            console.error('SMS template command error:', error);
-            await ctx.reply('❌ Error fetching SMS template. Please try again later.');
-        }
-    });
+    // Template designer commands are managed through /templates (see bot/commands/templates.js)
 
     // NEW: SMS delivery status check command
     bot.command('smsstatus', async ctx => {
@@ -1132,7 +944,6 @@ module.exports = {
     registerSmsCommands,
     viewSmsConversation,
     getSmsStats,
-    showSmsTemplates,
     // Export new functions
     viewStoredSmsConversation
 };

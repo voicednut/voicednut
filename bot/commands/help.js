@@ -18,12 +18,10 @@ module.exports = (bot) => {
 • /start - Restart bot &amp; show main menu
 • /call - Start a new voice call
 • /sms - Send an SMS message
-• /app - Open web app for advanced actions
+• /miniapp - Open web app for advanced actions
 • /smsconversation &lt;phone&gt; - View SMS conversation
 • /transcript &lt;call_sid&gt; - Get call transcript
 • /calls [limit] - List recent calls (max 50)
-• /smstemplates - View available SMS templates
-• /smstemplate &lt;name&gt; - View specific template
 • /health or /ping - Check bot &amp; API health
 • /guide - Show detailed usage guide
 • /menu - Show quick action buttons
@@ -39,7 +37,7 @@ module.exports = (bot) => {
 • /users - List all authorized users
 • /bulksms - Send bulk SMS messages
 • /schedulesms - Schedule SMS for later
-• /templates - Manage SMS templates
+• /templates - Manage call &amp; SMS templates
 • /smsstats - View SMS statistics
 • /status - Full system status check
 • /testapi - Test API connection`;

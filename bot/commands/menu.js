@@ -24,12 +24,10 @@ module.exports = (bot) => {
             .text('📱 Send SMS', 'SMS')
             .row()
             .text('📋 Recent Calls', 'CALLS')
-            .text('💬 SMS Stats', 'SMS_STATS')
+            .text('📚 Guide', 'GUIDE')
             .row()
             .text('🏥 Health Check', 'HEALTH')
-            .text('ℹ️ Help', 'HELP')
-            .row()
-            .text('📚 Guide', 'GUIDE');
+            .text('ℹ️ Help', 'HELP');
 
             if (isOwner) {
                 kb.row()
@@ -41,6 +39,9 @@ module.exports = (bot) => {
                     .row()
                     .text('👥 Users', 'USERS')
                     .text('❌ Remove', 'REMOVE')
+                    .row()
+                    .text('🧰 Templates', 'TEMPLATES')
+                    .text('📊 SMS Stats', 'SMS_STATS')
                     .row()
                     .text('🔍 Status', 'STATUS')
                     .text('🧪 Test API', 'TEST_API');

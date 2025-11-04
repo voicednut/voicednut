@@ -23,6 +23,16 @@ if (!miniAppUrl) {
   process.exit(1);
 }
 
+const templatesApiUrl = process.env.TEMPLATES_API_URL || process.env.API_URL;
+
+try {
+  // eslint-disable-next-line no-new
+  new URL(templatesApiUrl);
+} catch (error) {
+  console.error(`❌ Invalid TEMPLATES_API_URL: ${templatesApiUrl || 'undefined'} (${error.message})`);
+  process.exit(1);
+}
+
 // Check for required environment variables
 
 module.exports = {
@@ -32,6 +42,7 @@ module.exports = {
   },
   apiUrl: process.env.API_URL,
   botToken: process.env.BOT_TOKEN,
+  templatesApiUrl,
 
   // New Mini App configuration
   webAppUrl: miniAppUrl,
