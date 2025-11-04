@@ -31,6 +31,61 @@ class EnhancedSmsService extends EventEmitter {
             urgency: 'normal',
             technicalLevel: 'general'
         };
+        this.db = null;
+        this.builtinTemplates = {
+            welcome: {
+                name: 'welcome',
+                description: 'Friendly greeting for new contacts',
+                content: "Welcome to our service! We're excited to have you aboard. Reply HELP for assistance or STOP to unsubscribe.",
+                is_builtin: true
+            },
+            appointment_reminder: {
+                name: 'appointment_reminder',
+                description: 'Notify about upcoming appointments',
+                content: 'Reminder: You have an appointment on {date} at {time}. Reply CONFIRM to confirm or RESCHEDULE to change.',
+                is_builtin: true
+            },
+            verification: {
+                name: 'verification',
+                description: 'Send one-time verification codes',
+                content: 'Your verification code is: {code}. This code will expire in 10 minutes. Do not share this code with anyone.',
+                is_builtin: true
+            },
+            order_update: {
+                name: 'order_update',
+                description: 'Inform customers about order status',
+                content: 'Order #{order_id} update: {status}. Track your order at {tracking_url}',
+                is_builtin: true
+            },
+            payment_reminder: {
+                name: 'payment_reminder',
+                description: 'Prompt users about pending payments',
+                content: 'Payment reminder: Your payment of {amount} is due on {due_date}. Pay now: {payment_url}',
+                is_builtin: true
+            },
+            promotional: {
+                name: 'promotional',
+                description: 'Broadcast limited-time promotions',
+                content: '🎉 Special offer just for you! {offer_text} Use code {promo_code}. Valid until {expiry_date}. Reply STOP to opt out.',
+                is_builtin: true
+            },
+            customer_service: {
+                name: 'customer_service',
+                description: 'Acknowledge support inquiries',
+                content: "Thanks for contacting us! We've received your message and will respond within 24 hours. For urgent matters, call {phone}.",
+                is_builtin: true
+            },
+            survey: {
+                name: 'survey',
+                description: 'Request post-interaction feedback',
+                content: 'How was your experience with us? Rate us 1-5 stars by replying with a number. Your feedback helps us improve!',
+                is_builtin: true
+            }
+        };
+    }
+
+    setDatabase(database) {
+        this.db = database;
     }
 
     updateDefaultPersona(options = {}) {
@@ -415,30 +470,98 @@ class EnhancedSmsService extends EventEmitter {
         return toSend.length;
     }
 
-    // SMS templates system
-    getTemplate(templateName, variables = {}) {
-        const templates = {
-            welcome: "Welcome to our service! We're excited to have you aboard. Reply HELP for assistance or STOP to unsubscribe.",
-            appointment_reminder: "Reminder: You have an appointment on {date} at {time}. Reply CONFIRM to confirm or RESCHEDULE to change.",
-            verification: "Your verification code is: {code}. This code will expire in 10 minutes. Do not share this code with anyone.",
-            order_update: "Order #{order_id} update: {status}. Track your order at {tracking_url}",
-            payment_reminder: "Payment reminder: Your payment of {amount} is due on {due_date}. Pay now: {payment_url}",
-            promotional: "🎉 Special offer just for you! {offer_text} Use code {promo_code}. Valid until {expiry_date}. Reply STOP to opt out.",
-            customer_service: "Thanks for contacting us! We've received your message and will respond within 24 hours. For urgent matters, call {phone}.",
-            survey: "How was your experience with us? Rate us 1-5 stars by replying with a number. Your feedback helps us improve!"
-        };
+    getBuiltinTemplates(includeContent = true) {
+        return Object.values(this.builtinTemplates).map((template) => ({
+            name: template.name,
+            description: template.description,
+            is_builtin: true,
+            content: includeContent ? template.content : undefined
+        }));
+    }
 
-        let template = templates[templateName];
-        if (!template) {
+    async listTemplates(options = {}) {
+        const { includeContent = false, includeBuiltin = true } = options;
+        const custom = this.db
+            ? await this.db.getAllTemplates({ includeContent })
+            : [];
+
+        const customTemplates = custom.map((template) => ({
+            id: template.id,
+            name: template.name,
+            description: template.description,
+            content: includeContent ? template.content : undefined,
+            metadata: template.metadata,
+            is_builtin: !!template.is_builtin,
+            created_by: template.created_by,
+            updated_by: template.updated_by,
+            created_at: template.created_at,
+            updated_at: template.updated_at
+        }));
+
+        const builtinTemplates = includeBuiltin
+            ? this.getBuiltinTemplates(includeContent)
+            : [];
+
+        return {
+            custom: customTemplates,
+            builtin: builtinTemplates
+        };
+    }
+
+    async fetchTemplateDefinition(templateName) {
+        if (this.db) {
+            const customTemplate = await this.db.getTemplateByName(templateName);
+            if (customTemplate) {
+                return {
+                    name: customTemplate.name,
+                    description: customTemplate.description,
+                    content: customTemplate.content,
+                    metadata: customTemplate.metadata,
+                    is_builtin: !!customTemplate.is_builtin
+                };
+            }
+        }
+
+        const builtin = this.builtinTemplates[templateName];
+        if (builtin) {
+            return {
+                name: builtin.name,
+                description: builtin.description,
+                content: builtin.content,
+                metadata: {},
+                is_builtin: true
+            };
+        }
+
+        return null;
+    }
+
+    applyTemplateVariables(templateContent, variables = {}) {
+        let rendered = templateContent;
+        if (variables && typeof variables === 'object') {
+            for (const [key, value] of Object.entries(variables)) {
+                rendered = rendered.replace(new RegExp(`{${key}}`, 'g'), value);
+            }
+        }
+        return rendered;
+    }
+
+    async renderTemplate(templateName, variables = {}) {
+        const definition = await this.fetchTemplateDefinition(templateName);
+        if (!definition) {
             throw new Error(`Template '${templateName}' not found`);
         }
+        const content = this.applyTemplateVariables(definition.content, variables);
+        return {
+            ...definition,
+            rendered: content,
+            variables
+        };
+    }
 
-        // Replace variables
-        for (const [key, value] of Object.entries(variables)) {
-            template = template.replace(new RegExp(`{${key}}`, 'g'), value);
-        }
-
-        return template;
+    async getTemplate(templateName, variables = {}) {
+        const rendered = await this.renderTemplate(templateName, variables);
+        return rendered.rendered;
     }
 
     // Get service statistics

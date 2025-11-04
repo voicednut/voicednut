@@ -8,6 +8,8 @@ class TextToSpeechService extends EventEmitter {
     super();
     this.nextExpectedIndex = 0;
     this.speechBuffer = {};
+    this.defaultVoiceModel = process.env.VOICE_MODEL || 'aura-asteria-en';
+    this.activeVoiceModel = this.defaultVoiceModel;
     
     // Validate required environment variables
     if (!process.env.DEEPGRAM_API_KEY) {
@@ -17,7 +19,18 @@ class TextToSpeechService extends EventEmitter {
       console.warn('⚠️ VOICE_MODEL not set, using default');
     }
     
-    console.log(`🎵 TTS Service initialized with voice model: ${process.env.VOICE_MODEL || 'default'}`);
+    console.log(`🎵 TTS Service initialized with voice model: ${this.defaultVoiceModel}`);
+  }
+
+  setVoiceModel(voiceModel) {
+    if (voiceModel && typeof voiceModel === 'string' && voiceModel.trim().length > 0) {
+      this.activeVoiceModel = voiceModel.trim();
+      console.log(`🎙️ TTS voice model set to: ${this.activeVoiceModel}`.cyan);
+    }
+  }
+
+  resetVoiceModel() {
+    this.activeVoiceModel = this.defaultVoiceModel;
   }
 
   async generate(gptReply, interactionCount) {
@@ -31,7 +44,7 @@ class TextToSpeechService extends EventEmitter {
     console.log(`🎵 TTS generating for: "${partialResponse.substring(0, 50)}..."`.cyan);
 
     try {
-      const voiceModel = process.env.VOICE_MODEL || 'aura-asteria-en';
+      const voiceModel = this.activeVoiceModel || this.defaultVoiceModel;
       const url = `https://api.deepgram.com/v1/speak?model=${voiceModel}&encoding=mulaw&sample_rate=8000&container=none`;
       
       console.log(`🌐 Making TTS request to: ${url}`.gray);

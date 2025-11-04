@@ -78,6 +78,10 @@ async function startServer() {
     await db.initialize();
     console.log('✅ Enhanced database initialized successfully'.green);
 
+    if (smsService && typeof smsService.setDatabase === 'function') {
+      smsService.setDatabase(db);
+    }
+
     // Start webhook service after database is ready
     console.log('Starting enhanced webhook service...'.yellow);
     webhookService.start(db);
@@ -158,7 +162,13 @@ app.ws('/connection', (ws) => {
           // Get call configuration and function system
           callConfig = callConfigurations.get(callSid);
           functionSystem = callFunctionSystems.get(callSid);
-          
+
+          if (callConfig?.voice_model) {
+            ttsService.setVoiceModel(callConfig.voice_model);
+          } else {
+            ttsService.resetVoiceModel();
+          }
+
           if (callConfig && functionSystem) {
             console.log(`🎭 Using adaptive configuration for ${functionSystem.context.industry} industry`.green);
             console.log(`🔧 Available functions: ${Object.keys(functionSystem.implementations).join(', ')}`.cyan);
@@ -540,7 +550,8 @@ app.post('/outbound-call', async (req, res) => {
       channel: rawChannel,
       emotion,
       urgency,
-      technical_level: technicalLevel
+      technical_level: technicalLevel,
+      voice_model
     } = req.body;
 
     if (!number) {
@@ -662,7 +673,8 @@ app.post('/outbound-call', async (req, res) => {
       business_display_name: businessProfile ? businessProfile.displayName : null,
       function_count: functionSystem.functions.length,
       prompt_source: promptSource,
-      persona_metadata: composition ? composition.metadata : null
+      persona_metadata: composition ? composition.metadata : null,
+      voice_model: voice_model || null
     };
 
     callConfigurations.set(call.sid, callConfig);
@@ -674,7 +686,8 @@ app.post('/outbound-call', async (req, res) => {
     try {
       const businessContextRecord = {
         ...functionSystem.context,
-        persona: composition ? composition.metadata : null
+        persona: composition ? composition.metadata : null,
+        voice_model: voice_model || null
       };
 
       await db.createCall({
@@ -715,7 +728,8 @@ app.post('/outbound-call', async (req, res) => {
       generated_functions: functionSystem.functions.length,
       function_types: functionSystem.functions.map(f => f.function.name),
       enhanced_webhooks: true,
-      persona: composition ? composition.metadata : null
+      persona: composition ? composition.metadata : null,
+      voice_model: voice_model || null
     });
 
   } catch (error) {
@@ -1820,8 +1834,13 @@ app.post('/api/sms/send', async (req, res) => {
             emotion,
             urgency,
             technical_level,
-            channel
+            channel,
+            template_name,
+            template_variables = {}
         } = req.body;
+
+        const templateName = template_name;
+        const templateVariables = template_variables || {};
 
         if (!to || !message) {
             return res.status(400).json({
@@ -1864,6 +1883,8 @@ app.post('/api/sms/send', async (req, res) => {
                 body: message,
                 status: result.status,
                 direction: 'outbound',
+                template_name: templateName || null,
+                template_variables: Object.keys(templateVariables || {}).length > 0 ? templateVariables : null,
                 user_chat_id: user_chat_id
             });
 
@@ -1883,6 +1904,14 @@ app.post('/api/sms/send', async (req, res) => {
         });
     } catch (error) {
         console.error('❌ SMS send error:', error);
+        if (error.status) {
+            return res.status(error.status).json({
+                success: false,
+                error: error.message,
+                code: error.code,
+                moreInfo: error.moreInfo
+            });
+        }
         res.status(500).json({
             success: false,
             error: 'Failed to send SMS',
@@ -1981,44 +2010,207 @@ app.post('/api/sms/schedule', async (req, res) => {
     }
 });
 
-// SMS templates endpoint
+// SMS templates API
 app.get('/api/sms/templates', async (req, res) => {
     try {
-        const { template_name, variables } = req.query;
+        const includeBuiltin = req.query.include_builtins !== 'false';
+        const detailed = req.query.detailed === 'true';
 
-        if (template_name) {
-            try {
-                const parsedVariables = variables ? JSON.parse(variables) : {};
-                const template = smsService.getTemplate(template_name, parsedVariables);
+        const { custom, builtin } = await smsService.listTemplates({
+            includeContent: detailed,
+            includeBuiltin
+        });
 
-                res.json({
-                    success: true,
-                    template_name,
-                    template,
-                    variables: parsedVariables
-                });
-            } catch (templateError) {
-                res.status(400).json({
-                    success: false,
-                    error: templateError.message
-                });
-            }
-        } else {
-            // Return available templates
-            res.json({
-                success: true,
-                available_templates: [
-                    'welcome', 'appointment_reminder', 'verification', 'order_update',
-                    'payment_reminder', 'promotional', 'customer_service', 'survey'
-                ]
-            });
-        }
+        res.json({
+            success: true,
+            templates: custom,
+            builtin
+        });
     } catch (error) {
         console.error('❌ SMS templates error:', error);
         res.status(500).json({
             success: false,
-            error: 'Failed to get templates'
+            error: 'Failed to fetch templates',
+            details: error.message
         });
+    }
+});
+
+app.get('/api/sms/templates/:templateName', async (req, res) => {
+    try {
+        const { templateName } = req.params;
+        const detailed = req.query.detailed !== 'false';
+
+        const template = await smsService.fetchTemplateDefinition(templateName);
+        if (!template) {
+            return res.status(404).json({
+                success: false,
+                error: `Template '${templateName}' not found`
+            });
+        }
+
+        if (!detailed) {
+            delete template.content;
+        }
+
+        res.json({
+            success: true,
+            template
+        });
+    } catch (error) {
+        console.error('❌ Error fetching template:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to fetch template',
+            details: error.message
+        });
+    }
+});
+
+app.post('/api/sms/templates', async (req, res) => {
+    try {
+        const { name, description, content, metadata, created_by } = req.body;
+
+        if (!name || !content) {
+            return res.status(400).json({
+                success: false,
+                error: 'Template name and content are required'
+            });
+        }
+
+        const existing = await smsService.fetchTemplateDefinition(name);
+        if (existing) {
+            return res.status(409).json({
+                success: false,
+                error: 'A template with that name already exists'
+            });
+        }
+
+        if (!db) {
+            return res.status(500).json({ success: false, error: 'Database not initialised' });
+        }
+
+        await db.createTemplate({
+            name,
+            description,
+            content,
+            metadata,
+            created_by
+        });
+
+        const template = await smsService.fetchTemplateDefinition(name);
+
+        res.status(201).json({
+            success: true,
+            template
+        });
+    } catch (error) {
+        console.error('❌ Error creating template:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to create template',
+            details: error.message
+        });
+    }
+});
+
+app.put('/api/sms/templates/:templateName', async (req, res) => {
+    try {
+        const { templateName } = req.params;
+        const { description, content, metadata, updated_by } = req.body;
+
+        if (!db) {
+            return res.status(500).json({ success: false, error: 'Database not initialised' });
+        }
+
+        const existing = await smsService.fetchTemplateDefinition(templateName);
+        if (!existing) {
+            return res.status(404).json({ success: false, error: 'Template not found' });
+        }
+        if (existing.is_builtin) {
+            return res.status(400).json({ success: false, error: 'Built-in templates cannot be edited' });
+        }
+
+        const updates = { updated_by };
+        if (description !== undefined) updates.description = description;
+        if (content !== undefined) updates.content = content;
+        if (metadata !== undefined) updates.metadata = metadata;
+
+        await db.updateTemplate(templateName, updates);
+
+        const template = await smsService.fetchTemplateDefinition(templateName);
+
+        res.json({ success: true, template });
+    } catch (error) {
+        console.error('❌ Error updating template:', error);
+        res.status(500).json({ success: false, error: 'Failed to update template', details: error.message });
+    }
+});
+
+app.delete('/api/sms/templates/:templateName', async (req, res) => {
+    try {
+        const { templateName } = req.params;
+
+        if (!db) {
+            return res.status(500).json({ success: false, error: 'Database not initialised' });
+        }
+
+        const existing = await smsService.fetchTemplateDefinition(templateName);
+        if (!existing) {
+            return res.status(404).json({ success: false, error: 'Template not found' });
+        }
+        if (existing.is_builtin) {
+            return res.status(400).json({ success: false, error: 'Built-in templates cannot be deleted' });
+        }
+
+        await db.deleteTemplate(templateName);
+        res.json({ success: true });
+    } catch (error) {
+        console.error('❌ Error deleting template:', error);
+        res.status(500).json({ success: false, error: 'Failed to delete template', details: error.message });
+    }
+});
+
+app.post('/api/sms/templates/:templateName/preview', async (req, res) => {
+    try {
+        const { templateName } = req.params;
+        const { to, variables = {}, from, persona_overrides = {} } = req.body;
+
+        if (!to) {
+            return res.status(400).json({ success: false, error: 'Preview destination number is required' });
+        }
+
+        const rendered = await smsService.renderTemplate(templateName, variables);
+        const result = await smsService.sendSMS(to, rendered.rendered, from, persona_overrides);
+
+        res.json({
+            success: true,
+            preview: {
+                to: result.to,
+                message_sid: result.message_sid,
+                content: rendered.rendered,
+                template: rendered.name,
+                variables: rendered.variables
+            }
+        });
+    } catch (error) {
+        console.error('❌ Error sending template preview:', error);
+        if (error.status) {
+            return res.status(error.status).json({
+                success: false,
+                error: error.message,
+                code: error.code,
+                moreInfo: error.moreInfo
+            });
+        }
+        if (error.response) {
+            return res.status(error.response.status || 400).json({
+                success: false,
+                error: error.message,
+                details: error.response.data || error.response
+            });
+        }
+        res.status(500).json({ success: false, error: 'Failed to send preview', details: error.message });
     }
 });
 
@@ -2051,6 +2243,172 @@ app.get('/api/sms/messages/conversation/:phone', async (req, res) => {
             error: 'Failed to fetch conversation',
             details: error.message
         });
+    }
+});
+
+// Call template management endpoints
+function normalizeTemplatePayload(body) {
+    const {
+        name,
+        description,
+        business_id,
+        prompt,
+        first_message,
+        voice_model,
+        persona_config
+    } = body;
+
+    const cleanVoiceModel = typeof voice_model === 'string' && voice_model.trim().length > 0
+        ? voice_model.trim()
+        : null;
+
+    let parsedPersona = null;
+    if (persona_config) {
+        if (typeof persona_config === 'string') {
+            try {
+                parsedPersona = JSON.parse(persona_config);
+            } catch (error) {
+                throw new Error('persona_config must be valid JSON');
+            }
+        } else if (typeof persona_config === 'object') {
+            parsedPersona = persona_config;
+        }
+    }
+
+    return {
+        name,
+        description,
+        business_id,
+        prompt,
+        first_message,
+        voice_model: cleanVoiceModel,
+        persona_config: parsedPersona
+    };
+}
+
+app.get('/api/call-templates', async (req, res) => {
+    try {
+        const templates = await db.getCallTemplates();
+        res.json({ success: true, templates });
+    } catch (error) {
+        console.error('❌ Failed to list call templates:', error);
+        res.status(500).json({ success: false, error: 'Failed to list call templates' });
+    }
+});
+
+app.get('/api/call-templates/:id', async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        if (Number.isNaN(id)) {
+            return res.status(400).json({ success: false, error: 'Invalid template ID' });
+        }
+
+        const template = await db.getCallTemplateById(id);
+        if (!template) {
+            return res.status(404).json({ success: false, error: 'Template not found' });
+        }
+
+        res.json({ success: true, template });
+    } catch (error) {
+        console.error('❌ Failed to fetch call template:', error);
+        res.status(500).json({ success: false, error: 'Failed to fetch call template' });
+    }
+});
+
+app.post('/api/call-templates', async (req, res) => {
+    try {
+        const payload = normalizeTemplatePayload(req.body);
+
+        if (!payload.name || payload.name.trim().length === 0) {
+            return res.status(400).json({ success: false, error: 'Template name is required' });
+        }
+
+        await db.createCallTemplate(payload);
+        const template = await db.getCallTemplateByName(payload.name);
+
+        res.status(201).json({ success: true, template });
+    } catch (error) {
+        console.error('❌ Failed to create call template:', error);
+        res.status(500).json({ success: false, error: 'Failed to create call template', details: error.message });
+    }
+});
+
+app.put('/api/call-templates/:id', async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        if (Number.isNaN(id)) {
+            return res.status(400).json({ success: false, error: 'Invalid template ID' });
+        }
+
+        const existing = await db.getCallTemplateById(id);
+        if (!existing) {
+            return res.status(404).json({ success: false, error: 'Template not found' });
+        }
+
+        const payload = normalizeTemplatePayload(req.body);
+        await db.updateCallTemplate(id, payload);
+        const updated = await db.getCallTemplateById(id);
+
+        res.json({ success: true, template: updated });
+    } catch (error) {
+        console.error('❌ Failed to update call template:', error);
+        res.status(500).json({ success: false, error: 'Failed to update call template', details: error.message });
+    }
+});
+
+app.post('/api/call-templates/:id/clone', async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        if (Number.isNaN(id)) {
+            return res.status(400).json({ success: false, error: 'Invalid template ID' });
+        }
+
+        const template = await db.getCallTemplateById(id);
+        if (!template) {
+            return res.status(404).json({ success: false, error: 'Template not found' });
+        }
+
+        const { name, description } = req.body;
+
+        if (!name || name.trim().length === 0) {
+            return res.status(400).json({ success: false, error: 'Clone name is required' });
+        }
+
+        await db.createCallTemplate({
+            name,
+            description: description || template.description,
+            business_id: template.business_id,
+            prompt: template.prompt,
+            first_message: template.first_message,
+            persona_config: template.persona_config,
+            voice_model: template.voice_model
+        });
+
+        const cloned = await db.getCallTemplateByName(name);
+        res.status(201).json({ success: true, template: cloned });
+    } catch (error) {
+        console.error('❌ Failed to clone call template:', error);
+        res.status(500).json({ success: false, error: 'Failed to clone call template', details: error.message });
+    }
+});
+
+app.delete('/api/call-templates/:id', async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        if (Number.isNaN(id)) {
+            return res.status(400).json({ success: false, error: 'Invalid template ID' });
+        }
+
+        const existing = await db.getCallTemplateById(id);
+        if (!existing) {
+            return res.status(404).json({ success: false, error: 'Template not found' });
+        }
+
+        await db.deleteCallTemplate(id);
+        res.json({ success: true });
+    } catch (error) {
+        console.error('❌ Failed to delete call template:', error);
+        res.status(500).json({ success: false, error: 'Failed to delete call template', details: error.message });
     }
 });
 
@@ -2223,78 +2581,6 @@ app.get('/api/sms/status/:messageSid', async (req, res) => {
         res.status(500).json({
             success: false,
             error: 'Failed to fetch message status',
-            details: error.message
-        });
-    }
-});
-
-// Enhanced SMS templates endpoint with better error handling
-app.get('/api/sms/templates/:templateName?', async (req, res) => {
-    try {
-        const { templateName } = req.params;
-        const { variables } = req.query;
-
-        // Built-in templates (fallback)
-        const builtInTemplates = {
-            welcome: 'Welcome to our service! We\'re excited to have you aboard. Reply HELP for assistance or STOP to unsubscribe.',
-            appointment_reminder: 'Reminder: You have an appointment on {date} at {time}. Reply CONFIRM to confirm or RESCHEDULE to change.',
-            verification: 'Your verification code is: {code}. This code will expire in 10 minutes. Do not share this code with anyone.',
-            order_update: 'Order #{order_id} update: {status}. Track your order at {tracking_url}',
-            payment_reminder: 'Payment reminder: Your payment of {amount} is due on {due_date}. Pay now: {payment_url}',
-            promotional: '🎉 Special offer just for you! {offer_text} Use code {promo_code}. Valid until {expiry_date}. Reply STOP to opt out.',
-            customer_service: 'Thanks for contacting us! We\'ve received your message and will respond within 24 hours. For urgent matters, call {phone}.',
-            survey: 'How was your experience with us? Rate us 1-5 stars by replying with a number. Your feedback helps us improve!'
-        };
-
-        if (templateName) {
-            // Get specific template
-            if (!builtInTemplates[templateName]) {
-                return res.status(404).json({
-                    success: false,
-                    error: `Template '${templateName}' not found`
-                });
-            }
-
-            let template = builtInTemplates[templateName];
-            let parsedVariables = {};
-
-            // Parse and apply variables if provided
-            if (variables) {
-                try {
-                    parsedVariables = JSON.parse(variables);
-                    
-                    // Replace variables in template
-                    for (const [key, value] of Object.entries(parsedVariables)) {
-                        template = template.replace(new RegExp(`{${key}}`, 'g'), value);
-                    }
-                } catch (parseError) {
-                    console.error('Error parsing template variables:', parseError);
-                    // Continue with template without variable substitution
-                }
-            }
-
-            res.json({
-                success: true,
-                template_name: templateName,
-                template: template,
-                original_template: builtInTemplates[templateName],
-                variables: parsedVariables
-            });
-
-        } else {
-            // Get list of available templates
-            res.json({
-                success: true,
-                available_templates: Object.keys(builtInTemplates),
-                template_count: Object.keys(builtInTemplates).length
-            });
-        }
-
-    } catch (error) {
-        console.error('❌ Error handling SMS templates:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Failed to process template request',
             details: error.message
         });
     }
