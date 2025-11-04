@@ -2,7 +2,8 @@ module.exports = {
   apps: [
     {
       name: 'BOT',
-      script: './bot.js',
+      script: './pm2-start.sh',
+      interpreter: '/bin/bash',
       cwd: '/home/ubuntu/voicednut/bot',
       instances: 1, // ✅ Single instance
       exec_mode: 'fork',
@@ -32,7 +33,6 @@ module.exports = {
       // listen_timeout: 3000,
 
       health_check_grace_period: 3000,
-      node_args: '--max-old-space-size=1024',
       merge_logs: true,
       time: true,
       autorestart: true,

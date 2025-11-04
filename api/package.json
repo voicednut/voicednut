@@ -5,8 +5,9 @@
   "main": "index.js",
   "scripts": {
     "test": "jest",
-    "dev": "nodemon app.js",
-    "start": "node app.js"
+    "db:migrate": "node scripts/db-migrate.js",
+    "dev": "npm run db:migrate && nodemon app.js",
+    "start": "npm run db:migrate && node app.js"
   },
   "keywords": [],
   "author": "Tunde Ednut",

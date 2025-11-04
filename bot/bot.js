@@ -1,5 +1,20 @@
-const { Bot, session, InlineKeyboard } = require('grammy');
-const { conversations, createConversation } = require('@grammyjs/conversations');
+let grammyPkg;
+try {
+    grammyPkg = require('grammy');
+} catch (error) {
+    console.error('❌ Missing dependency "grammy". Run `npm ci --omit=dev` in /bot before starting PM2.');
+    throw error;
+}
+const { Bot, session, InlineKeyboard } = grammyPkg;
+
+let conversationsPkg;
+try {
+    conversationsPkg = require('@grammyjs/conversations');
+} catch (error) {
+    console.error('❌ Missing dependency "@grammyjs/conversations". Run `npm ci --omit=dev` in /bot before starting PM2.');
+    throw error;
+}
+const { conversations, createConversation } = conversationsPkg;
 const axios = require('axios');
 const config = require('./config');
 
