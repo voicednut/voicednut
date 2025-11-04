@@ -1,5 +1,6 @@
 const { Bot, session, InlineKeyboard } = require('grammy');
 const { conversations, createConversation } = require('@grammyjs/conversations');
+const axios = require('axios');
 const config = require('./config');
 
 // Bot initialization
@@ -37,6 +38,33 @@ bot.catch((err) => {
         console.error('Failed to send error message:', replyError);
     }
 });
+
+async function validateTemplatesApiConnectivity() {
+    const healthUrl = new URL('/health', config.templatesApiUrl).toString();
+    try {
+        const response = await axios.get(healthUrl, { timeout: 5000 });
+        const contentType = response.headers?.['content-type'] || '';
+        if (!contentType.includes('application/json')) {
+            throw new Error(`healthcheck returned ${contentType || 'unknown'} content`);
+        }
+        if (response.data?.status && response.data.status !== 'healthy') {
+            throw new Error(`service reported status "${response.data.status}"`);
+        }
+        console.log(`✅ Templates API reachable (${healthUrl})`);
+    } catch (error) {
+        let reason;
+        if (error.response) {
+            const status = error.response.status;
+            const statusText = error.response.statusText || '';
+            reason = `HTTP ${status} ${statusText}`;
+        } else if (error.request) {
+            reason = 'no response received';
+        } else {
+            reason = error.message;
+        }
+        throw new Error(`Unable to reach Templates API at ${healthUrl}: ${reason}`);
+    }
+}
 
 // Import dependencies
 const { getUser, isAdmin, expireInactiveUsers } = require('./db/db');
@@ -183,7 +211,7 @@ bot.on('callback_query:data', async (ctx) => {
 
         // Check admin permissions
         const isAdminUser = user.role === 'ADMIN';
-        const adminActions = ['ADDUSER', 'PROMOTE', 'REMOVE', 'USERS', 'STATUS', 'TEST_API'];
+        const adminActions = ['ADDUSER', 'PROMOTE', 'REMOVE', 'USERS', 'STATUS', 'TEST_API', 'TEMPLATES', 'SMS_STATS'];
         
         if (adminActions.includes(action) && !isAdminUser) {
             await ctx.reply("❌ This action is for administrators only.");
@@ -198,7 +226,8 @@ bot.on('callback_query:data', async (ctx) => {
             'REMOVE': 'remove-conversation',
             'SMS': 'sms-conversation',
             'BULK_SMS': 'bulk-sms-conversation',
-            'SCHEDULE_SMS': 'schedule-sms-conversation'
+            'SCHEDULE_SMS': 'schedule-sms-conversation',
+            'TEMPLATES': 'templates-conversation'
         };
 
         if (conversations[action]) {
@@ -211,7 +240,7 @@ bot.on('callback_query:data', async (ctx) => {
         // Handle direct command actions
         switch (action) {
             case 'HELP':
-                await executeHelpCommand(ctx, isAdminUser);
+                await executeHelpCommand(ctx);
                 break;
                 
             case 'USERS':
@@ -301,13 +330,11 @@ async function executeHelpCommand(ctx) {
         let helpText = `📱 <b>Basic Commands</b>
 • /start - Restart bot &amp; show main menu
 • /call - Start a new voice call
-• /app - Open the Mini App
 • /sms - Send an SMS message
+• /miniapp - Open the Mini App
 • /smsconversation &lt;phone&gt; - View SMS conversation
 • /transcript &lt;call_sid&gt; - Get call transcript
 • /calls [limit] - List recent calls (max 50)
-• /smstemplates - View available SMS templates
-• /smstemplate &lt;name&gt; - View specific template
 • /health or /ping - Check bot &amp; API health
 • /guide - Show detailed usage guide
 • /menu - Show quick action buttons
@@ -323,6 +350,8 @@ async function executeHelpCommand(ctx) {
 • /users - List all authorized users
 • /bulksms - Send bulk SMS messages
 • /schedulesms - Schedule SMS for later
+• /smsstats - View SMS statistics
+• /templates - Manage call &amp; SMS templates
 • /status - Full system status check
 • /testapi - Test API connection`;
         }
@@ -738,7 +767,6 @@ bot.api.setMyCommands([
     { command: 'sms', description: 'Send SMS message' },
     { command: 'transcript', description: 'Get call transcript by SID' },
     { command: 'calls', description: 'List recent calls' },
-    { command: 'smstemplates', description: 'View SMS templates' },
     { command: 'smsconversation', description: 'View SMS conversation' },
     { command: 'guide', description: 'Show detailed usage guide' },
     { command: 'help', description: 'Show available commands' },
@@ -747,7 +775,7 @@ bot.api.setMyCommands([
     { command: 'bulksms', description: 'Send bulk SMS (admin only)' },
     { command: 'schedulesms', description: 'Schedule SMS message' },
     { command: 'smsstats', description: 'SMS statistics (admin only)' },
-    { command: 'smstemplate', description: 'View specific SMS template'},
+    { command: 'templates', description: 'Manage call & SMS templates (admin only)' },
     { command: 'adduser', description: 'Add user (admin only)' },
     { command: 'promote', description: 'Promote to ADMIN (admin only)' },
     { command: 'removeuser', description: 'Remove a USER (admin only)' },
@@ -770,12 +798,23 @@ bot.on('message:text', async (ctx) => {
     }
 });
 
-// Start the bot
-console.log('🚀 Starting Voice Call Bot...');
-bot.start().then(() => {
-    console.log('✅ Voice Call Bot is running!');
-    console.log('🔄 Polling for updates...');
-}).catch((error) => {
-    console.error('❌ Failed to start bot:', error);
-    process.exit(1);
-});
+async function bootstrap() {
+    try {
+        await validateTemplatesApiConnectivity();
+    } catch (error) {
+        console.error(`❌ ${error.message}`);
+        process.exit(1);
+    }
+
+    console.log('🚀 Starting Voice Call Bot...');
+    try {
+        await bot.start();
+        console.log('✅ Voice Call Bot is running!');
+        console.log('🔄 Polling for updates...');
+    } catch (error) {
+        console.error('❌ Failed to start bot:', error);
+        process.exit(1);
+    }
+}
+
+bootstrap();

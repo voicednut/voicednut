@@ -1,4 +1,6 @@
 const config = require('../config');
+
+const templatesApiBase = config.templatesApiUrl.replace(/\/+$/, '');
 const axios = require('axios');
 const { getUser } = require('../db/db');
 const {
@@ -39,13 +41,71 @@ async function collectPlaceholderValues(conversation, ctx, placeholders) {
     return values;
 }
 
+function formatTemplatesApiError(error, action) {
+    const baseHelp = `Ensure the templates service is reachable at ${templatesApiBase} or update TEMPLATES_API_URL.`;
+
+    if (error.response) {
+        const status = error.response.status;
+        const contentType = error.response.headers?.['content-type'] || '';
+        if (!contentType.includes('application/json')) {
+            return `❌ ${action}: Templates API responded with HTTP ${status}. ${baseHelp}`;
+        }
+        const details = error.response.data?.error || error.response.data?.message || `HTTP ${status}`;
+        return `❌ ${action}: ${details}`;
+    }
+
+    if (error.request) {
+        return `❌ ${action}: No response from Templates API. ${baseHelp}`;
+    }
+
+    if (error.message) {
+        return `❌ ${action}: ${error.message}`;
+    }
+
+    return `❌ ${action}: Unknown error contacting Templates API.`;
+}
+
 async function fetchCallTemplates() {
-    const response = await axios.get(`${config.apiUrl}/call-templates`);
-    return response.data.templates || [];
+    try {
+        const response = await axios.get(`${templatesApiBase}/api/call-templates`, { timeout: 15000 });
+        const contentType = response.headers?.['content-type'] || '';
+        if (!contentType.includes('application/json')) {
+            throw new Error('Templates API returned non-JSON response');
+        }
+        if (response.data && response.data.success === false) {
+            throw new Error(response.data.error || 'Templates API reported failure');
+        }
+        return response.data.templates || [];
+    } catch (error) {
+        throw new Error(formatTemplatesApiError(error, 'Failed to load call templates'));
+    }
+}
+
+async function fetchCallTemplateById(id) {
+    try {
+        const response = await axios.get(`${templatesApiBase}/api/call-templates/${id}`, { timeout: 15000 });
+        const contentType = response.headers?.['content-type'] || '';
+        if (!contentType.includes('application/json')) {
+            throw new Error('Templates API returned non-JSON response');
+        }
+        if (response.data && response.data.success === false) {
+            throw new Error(response.data.error || 'Templates API reported failure');
+        }
+        return response.data.template;
+    } catch (error) {
+        throw new Error(formatTemplatesApiError(error, 'Failed to load template details'));
+    }
 }
 
 async function selectCallTemplate(conversation, ctx) {
-    const templates = await fetchCallTemplates();
+    let templates;
+    try {
+        templates = await fetchCallTemplates();
+    } catch (error) {
+        await ctx.reply(error.message || '❌ Failed to load call templates.');
+        return null;
+    }
+
     if (!templates.length) {
         await ctx.reply('ℹ️ No call templates available. Use /templates to create one.');
         return null;
@@ -72,8 +132,13 @@ async function selectCallTemplate(conversation, ctx) {
         return null;
     }
 
-    const templateResponse = await axios.get(`${config.apiUrl}/call-templates/${templateId}`);
-    const template = templateResponse.data.template;
+    let template;
+    try {
+        template = await fetchCallTemplateById(templateId);
+    } catch (error) {
+        await ctx.reply(error.message || '❌ Failed to load template.');
+        return null;
+    }
 
     if (!template) {
         await ctx.reply('❌ Template not found.');

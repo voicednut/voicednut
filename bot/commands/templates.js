@@ -11,6 +11,99 @@ const {
 } = require('../utils/persona');
 const { extractTemplateVariables } = require('../utils/templates');
 
+const templatesApi = axios.create({
+  baseURL: config.templatesApiUrl.replace(/\/+$/, ''),
+  timeout: 15000,
+  headers: { 'Content-Type': 'application/json' }
+});
+
+function nonJsonResponseError(endpoint, response) {
+  const contentType = response?.headers?.['content-type'] || 'unknown';
+  const snippet =
+    typeof response?.data === 'string'
+      ? response.data.replace(/\s+/g, ' ').trim().slice(0, 140)
+      : '';
+  const error = new Error(
+    `Templates API returned non-JSON response (content-type: ${contentType})`
+  );
+  error.isTemplatesApiError = true;
+  error.reason = 'non_json_response';
+  error.endpoint = endpoint;
+  error.contentType = contentType;
+  error.snippet = snippet;
+  return error;
+}
+
+async function templatesApiRequest(options) {
+  const endpoint = `${(options.method || 'GET').toUpperCase()} ${options.url}`;
+  try {
+    const response = await templatesApi.request(options);
+    const contentType = response.headers?.['content-type'] || '';
+    if (!contentType.includes('application/json')) {
+      throw nonJsonResponseError(endpoint, response);
+    }
+    if (response.data && response.data.success === false) {
+      const apiError = new Error(response.data.error || 'Templates API reported failure');
+      apiError.isTemplatesApiError = true;
+      apiError.reason = 'api_failure';
+      apiError.endpoint = endpoint;
+      throw apiError;
+    }
+    return response.data;
+  } catch (error) {
+    if (error.response) {
+      const contentType = error.response.headers?.['content-type'] || '';
+      if (!contentType.includes('application/json')) {
+        throw nonJsonResponseError(endpoint, error.response);
+      }
+    }
+    error.templatesApi = { endpoint };
+    throw error;
+  }
+}
+
+function formatTemplatesApiError(error, action) {
+  const baseHelp = `Ensure the templates service is reachable at ${config.templatesApiUrl} or update TEMPLATES_API_URL.`;
+
+  if (error.isTemplatesApiError && error.reason === 'non_json_response') {
+    return `❌ ${action}: Templates API returned unexpected content (type: ${error.contentType}). ${baseHelp}${
+      error.snippet ? `\nSnippet: ${error.snippet}` : ''
+    }`;
+  }
+
+  if (error.isTemplatesApiError && error.reason === 'api_failure') {
+    return `❌ ${action}: ${error.message}. ${baseHelp}`;
+  }
+
+  if (error.response) {
+    const status = error.response.status;
+    const statusText = error.response.statusText || '';
+    const details =
+      error.response.data?.error ||
+      error.response.data?.message ||
+      error.message;
+
+    const contentType = error.response.headers?.['content-type'] || '';
+    if (!contentType.includes('application/json')) {
+      const snippet =
+        typeof error.response.data === 'string'
+          ? error.response.data.replace(/\s+/g, ' ').trim().slice(0, 140)
+          : '';
+      return `❌ ${action}: Templates API responded with HTTP ${status} ${statusText}. ${baseHelp}${
+        snippet ? `\nSnippet: ${snippet}` : ''
+      }`;
+    }
+
+    return `❌ ${action}: ${details || `HTTP ${status}`}`;
+  }
+
+  if (error.request) {
+    return `❌ ${action}: No response from Templates API. ${baseHelp}`;
+  }
+
+  return `❌ ${action}: ${error.message}`;
+}
+
 const CANCEL_KEYWORDS = new Set(['cancel', 'exit', 'quit']);
 
 function isCancelInput(text) {
@@ -354,32 +447,32 @@ async function collectPromptAndVoice(conversation, ctx, defaults = {}) {
 }
 
 async function fetchCallTemplates() {
-  const response = await axios.get(`${config.apiUrl}/call-templates`);
-  return response.data.templates || [];
+  const data = await templatesApiRequest({ method: 'get', url: '/api/call-templates' });
+  return data.templates || [];
 }
 
 async function fetchCallTemplateById(id) {
-  const response = await axios.get(`${config.apiUrl}/call-templates/${id}`);
-  return response.data.template;
+  const data = await templatesApiRequest({ method: 'get', url: `/api/call-templates/${id}` });
+  return data.template;
 }
 
 async function createCallTemplate(payload) {
-  const response = await axios.post(`${config.apiUrl}/call-templates`, payload);
-  return response.data.template;
+  const data = await templatesApiRequest({ method: 'post', url: '/api/call-templates', data: payload });
+  return data.template;
 }
 
 async function updateCallTemplate(id, payload) {
-  const response = await axios.put(`${config.apiUrl}/call-templates/${id}`, payload);
-  return response.data.template;
+  const data = await templatesApiRequest({ method: 'put', url: `/api/call-templates/${id}`, data: payload });
+  return data.template;
 }
 
 async function deleteCallTemplate(id) {
-  await axios.delete(`${config.apiUrl}/call-templates/${id}`);
+  await templatesApiRequest({ method: 'delete', url: `/api/call-templates/${id}` });
 }
 
 async function cloneCallTemplate(id, payload) {
-  const response = await axios.post(`${config.apiUrl}/call-templates/${id}/clone`, payload);
-  return response.data.template;
+  const data = await templatesApiRequest({ method: 'post', url: `/api/call-templates/${id}/clone`, data: payload });
+  return data.template;
 }
 
 function formatCallTemplateSummary(template) {
@@ -553,8 +646,8 @@ async function createCallTemplateFlow(conversation, ctx) {
     const template = await createCallTemplate(templatePayload);
     await ctx.reply(`✅ Template *${escapeMarkdown(template.name)}* created successfully!`, { parse_mode: 'Markdown' });
   } catch (error) {
-    console.error('Failed to create template:', error?.response?.data || error.message);
-    await ctx.reply(`❌ Failed to create template: ${error?.response?.data?.error || error.message}`);
+    console.error('Failed to create template:', error);
+    await ctx.reply(formatTemplatesApiError(error, 'Failed to create template'));
   }
 }
 
@@ -625,8 +718,8 @@ async function editCallTemplateFlow(conversation, ctx, template) {
     const updated = await updateCallTemplate(template.id, updates);
     await ctx.reply(`✅ Template *${escapeMarkdown(updated.name)}* updated.`, { parse_mode: 'Markdown' });
   } catch (error) {
-    console.error('Failed to update template:', error?.response?.data || error.message);
-    await ctx.reply(`❌ Failed to update template: ${error?.response?.data?.error || error.message}`);
+    console.error('Failed to update template:', error);
+    await ctx.reply(formatTemplatesApiError(error, 'Failed to update template'));
   }
 }
 
@@ -660,8 +753,8 @@ async function cloneCallTemplateFlow(conversation, ctx, template) {
     });
     await ctx.reply(`✅ Template cloned as *${escapeMarkdown(cloned.name)}*.`, { parse_mode: 'Markdown' });
   } catch (error) {
-    console.error('Failed to clone template:', error?.response?.data || error.message);
-    await ctx.reply(`❌ Failed to clone template: ${error?.response?.data?.error || error.message}`);
+    console.error('Failed to clone template:', error);
+    await ctx.reply(formatTemplatesApiError(error, 'Failed to clone template'));
   }
 }
 
@@ -676,8 +769,8 @@ async function deleteCallTemplateFlow(conversation, ctx, template) {
     await deleteCallTemplate(template.id);
     await ctx.reply(`🗑️ Template *${escapeMarkdown(template.name)}* deleted.`, { parse_mode: 'Markdown' });
   } catch (error) {
-    console.error('Failed to delete template:', error?.response?.data || error.message);
-    await ctx.reply(`❌ Failed to delete template: ${error?.response?.data?.error || error.message}`);
+    console.error('Failed to delete template:', error);
+    await ctx.reply(formatTemplatesApiError(error, 'Failed to delete template'));
   }
 }
 
@@ -707,7 +800,13 @@ async function showCallTemplateDetail(conversation, ctx, template) {
         break;
       case 'edit':
         await editCallTemplateFlow(conversation, ctx, template);
-        template = await fetchCallTemplateById(template.id);
+        try {
+          template = await fetchCallTemplateById(template.id);
+        } catch (error) {
+          console.error('Failed to refresh call template after edit:', error);
+          await ctx.reply(formatTemplatesApiError(error, 'Failed to refresh template details'));
+          viewing = false;
+        }
         break;
       case 'clone':
         await cloneCallTemplateFlow(conversation, ctx, template);
@@ -774,16 +873,21 @@ async function listCallTemplatesFlow(conversation, ctx) {
       return;
     }
 
-    const template = await fetchCallTemplateById(templateId);
-    if (!template) {
-      await ctx.reply('❌ Template not found.');
-      return;
-    }
+    try {
+      const template = await fetchCallTemplateById(templateId);
+      if (!template) {
+        await ctx.reply('❌ Template not found.');
+        return;
+      }
 
-    await showCallTemplateDetail(conversation, ctx, template);
+      await showCallTemplateDetail(conversation, ctx, template);
+    } catch (error) {
+      console.error('Failed to load call template details:', error);
+      await ctx.reply(formatTemplatesApiError(error, 'Failed to load template details'));
+    }
   } catch (error) {
-    console.error('Failed to list templates:', error?.response?.data || error.message);
-    await ctx.reply(`❌ Failed to list templates: ${error?.response?.data?.error || error.message}`);
+    console.error('Failed to list templates:', error);
+    await ctx.reply(formatTemplatesApiError(error, 'Failed to list call templates'));
   }
 }
 
@@ -819,20 +923,22 @@ async function callTemplatesMenu(conversation, ctx) {
 }
 
 async function fetchSmsTemplates({ includeContent = false } = {}) {
-  const response = await axios.get(`${config.apiUrl}/api/sms/templates`, {
+  const data = await templatesApiRequest({
+    method: 'get',
+    url: '/api/sms/templates',
     params: {
       include_builtins: true,
       detailed: includeContent
     }
   });
 
-  const custom = (response.data.templates || []).map((template) => ({
+  const custom = (data.templates || []).map((template) => ({
     ...template,
     is_builtin: !!template.is_builtin,
     metadata: template.metadata || {}
   }));
 
-  const builtin = (response.data.builtin || []).map((template) => ({
+  const builtin = (data.builtin || []).map((template) => ({
     ...template,
     is_builtin: true,
     metadata: template.metadata || {}
@@ -842,11 +948,13 @@ async function fetchSmsTemplates({ includeContent = false } = {}) {
 }
 
 async function fetchSmsTemplateByName(name, { detailed = true } = {}) {
-  const response = await axios.get(`${config.apiUrl}/api/sms/templates/${encodeURIComponent(name)}`, {
+  const data = await templatesApiRequest({
+    method: 'get',
+    url: `/api/sms/templates/${encodeURIComponent(name)}`,
     params: { detailed }
   });
 
-  const template = response.data.template;
+  const template = data.template;
   if (template) {
     template.is_builtin = !!template.is_builtin;
     template.metadata = template.metadata || {};
@@ -855,29 +963,26 @@ async function fetchSmsTemplateByName(name, { detailed = true } = {}) {
 }
 
 async function createSmsTemplate(payload) {
-  const response = await axios.post(`${config.apiUrl}/api/sms/templates`, payload);
-  return response.data.template;
+  const data = await templatesApiRequest({ method: 'post', url: '/api/sms/templates', data: payload });
+  return data.template;
 }
 
 async function updateSmsTemplate(name, payload) {
-  const response = await axios.put(`${config.apiUrl}/api/sms/templates/${encodeURIComponent(name)}`, payload);
-  return response.data.template;
+  const data = await templatesApiRequest({ method: 'put', url: `/api/sms/templates/${encodeURIComponent(name)}`, data: payload });
+  return data.template;
 }
 
 async function deleteSmsTemplate(name) {
-  await axios.delete(`${config.apiUrl}/api/sms/templates/${encodeURIComponent(name)}`);
+  await templatesApiRequest({ method: 'delete', url: `/api/sms/templates/${encodeURIComponent(name)}` });
 }
 
 async function requestSmsTemplatePreview(name, payload) {
-  const response = await axios.post(
-    `${config.apiUrl}/api/sms/templates/${encodeURIComponent(name)}/preview`,
-    payload,
-    {
-      headers: { 'Content-Type': 'application/json' },
-      timeout: 30000
-    }
-  );
-  return response.data.preview;
+  const data = await templatesApiRequest({
+    method: 'post',
+    url: `/api/sms/templates/${encodeURIComponent(name)}/preview`,
+    data: payload
+  });
+  return data.preview;
 }
 
 function formatSmsTemplateSummary(template) {
@@ -979,8 +1084,8 @@ async function createSmsTemplateFlow(conversation, ctx) {
     const template = await createSmsTemplate(payload);
     await ctx.reply(`✅ SMS template *${escapeMarkdown(template.name)}* created.`, { parse_mode: 'Markdown' });
   } catch (error) {
-    console.error('Failed to create SMS template:', error?.response?.data || error.message);
-    await ctx.reply(`❌ Failed to create SMS template: ${error?.response?.data?.error || error.message}`);
+    console.error('Failed to create SMS template:', error);
+    await ctx.reply(formatTemplatesApiError(error, 'Failed to create SMS template'));
   }
 }
 
@@ -1055,8 +1160,8 @@ async function editSmsTemplateFlow(conversation, ctx, template) {
     const updated = await updateSmsTemplate(template.name, updates);
     await ctx.reply(`✅ SMS template *${escapeMarkdown(updated.name)}* updated.`, { parse_mode: 'Markdown' });
   } catch (error) {
-    console.error('Failed to update SMS template:', error?.response?.data || error.message);
-    await ctx.reply(`❌ Failed to update SMS template: ${error?.response?.data?.error || error.message}`);
+    console.error('Failed to update SMS template:', error);
+    await ctx.reply(formatTemplatesApiError(error, 'Failed to update SMS template'));
   }
 }
 
@@ -1104,8 +1209,8 @@ async function cloneSmsTemplateFlow(conversation, ctx, template) {
     const cloned = await createSmsTemplate(payload);
     await ctx.reply(`✅ Template cloned as *${escapeMarkdown(cloned.name)}*.`, { parse_mode: 'Markdown' });
   } catch (error) {
-    console.error('Failed to clone SMS template:', error?.response?.data || error.message);
-    await ctx.reply(`❌ Failed to clone SMS template: ${error?.response?.data?.error || error.message}`);
+    console.error('Failed to clone SMS template:', error);
+    await ctx.reply(formatTemplatesApiError(error, 'Failed to clone SMS template'));
   }
 }
 
@@ -1125,8 +1230,8 @@ async function deleteSmsTemplateFlow(conversation, ctx, template) {
     await deleteSmsTemplate(template.name);
     await ctx.reply(`🗑️ Template *${escapeMarkdown(template.name)}* deleted.`, { parse_mode: 'Markdown' });
   } catch (error) {
-    console.error('Failed to delete SMS template:', error?.response?.data || error.message);
-    await ctx.reply(`❌ Failed to delete SMS template: ${error?.response?.data?.error || error.message}`);
+    console.error('Failed to delete SMS template:', error);
+    await ctx.reply(formatTemplatesApiError(error, 'Failed to delete SMS template'));
   }
 }
 
@@ -1181,9 +1286,8 @@ async function previewSmsTemplate(conversation, ctx, template) {
       { parse_mode: 'Markdown' }
     );
   } catch (error) {
-    console.error('Failed to send SMS preview:', error?.response?.data || error.message);
-    const details = error?.response?.data?.error || error.message;
-    await ctx.reply(`❌ Failed to send preview: ${details}`);
+    console.error('Failed to send SMS preview:', error);
+    await ctx.reply(formatTemplatesApiError(error, 'Failed to send SMS preview'));
   }
 }
 
@@ -1219,7 +1323,13 @@ async function showSmsTemplateDetail(conversation, ctx, template) {
         break;
       case 'edit':
         await editSmsTemplateFlow(conversation, ctx, template);
-        template = await fetchSmsTemplateByName(template.name, { detailed: true });
+        try {
+          template = await fetchSmsTemplateByName(template.name, { detailed: true });
+        } catch (error) {
+          console.error('Failed to refresh SMS template after edit:', error);
+          await ctx.reply(formatTemplatesApiError(error, 'Failed to refresh template details'));
+          viewing = false;
+        }
         break;
       case 'clone':
         await cloneSmsTemplateFlow(conversation, ctx, template);
@@ -1290,16 +1400,21 @@ async function listSmsTemplatesFlow(conversation, ctx) {
       return;
     }
 
-    const template = await fetchSmsTemplateByName(selection.id, { detailed: true });
-    if (!template) {
-      await ctx.reply('❌ Template not found.');
-      return;
-    }
+    try {
+      const template = await fetchSmsTemplateByName(selection.id, { detailed: true });
+      if (!template) {
+        await ctx.reply('❌ Template not found.');
+        return;
+      }
 
-    await showSmsTemplateDetail(conversation, ctx, template);
+      await showSmsTemplateDetail(conversation, ctx, template);
+    } catch (error) {
+      console.error('Failed to load SMS template details:', error);
+      await ctx.reply(formatTemplatesApiError(error, 'Failed to load template details'));
+    }
   } catch (error) {
-    console.error('Failed to list SMS templates:', error?.response?.data || error.message);
-    await ctx.reply(`❌ Failed to list SMS templates: ${error?.response?.data?.error || error.message}`);
+    console.error('Failed to list SMS templates:', error);
+    await ctx.reply(formatTemplatesApiError(error, 'Failed to list SMS templates'));
   }
 }
 
