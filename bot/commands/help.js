@@ -39,6 +39,7 @@ module.exports = (bot) => {
 • /users - List all authorized users
 • /bulksms - Send bulk SMS messages
 • /schedulesms - Schedule SMS for later
+• /templates - Manage SMS templates
 • /smsstats - View SMS statistics
 • /status - Full system status check
 • /testapi - Test API connection`;

@@ -42,6 +42,7 @@ bot.catch((err) => {
 const { getUser, isAdmin, expireInactiveUsers } = require('./db/db');
 const { callFlow, registerCallCommand } = require('./commands/call');
 const { smsFlow, bulkSmsFlow, scheduleSmsFlow, registerSmsCommands } = require('./commands/sms');
+const { templatesFlow, registerTemplatesCommand } = require('./commands/templates');
 const {
     addUserFlow,
     registerAddUserCommand,
@@ -60,6 +61,7 @@ bot.use(wrapConversation(removeUserFlow, "remove-conversation"));
 bot.use(wrapConversation(scheduleSmsFlow, "schedule-sms-conversation"));
 bot.use(wrapConversation(smsFlow, "sms-conversation"));
 bot.use(wrapConversation(bulkSmsFlow, "bulk-sms-conversation"));
+bot.use(wrapConversation(templatesFlow, "templates-conversation"));
 
 // Register command handlers
 registerCallCommand(bot);
@@ -67,6 +69,7 @@ registerAddUserCommand(bot);
 registerPromoteCommand(bot);
 registerRemoveUserCommand(bot);
 registerSmsCommands(bot);
+registerTemplatesCommand(bot);
 registerUserListCommand(bot);
 
 

@@ -10,37 +10,12 @@ const {
     getOptionLabel
 } = require('../utils/persona');
 
-const TEMPLATE_METADATA = {
-    welcome: { label: 'Welcome Message', description: 'Friendly greeting for new contacts' },
-    appointment_reminder: { label: 'Appointment Reminder', description: 'Notify about upcoming appointments' },
-    verification: { label: 'Verification Code', description: 'Send one-time verification codes' },
-    order_update: { label: 'Order Update', description: 'Inform customers about order status' },
-    payment_reminder: { label: 'Payment Reminder', description: 'Prompt users about pending payments' },
-    promotional: { label: 'Promotional Offer', description: 'Broadcast limited-time promotions' },
-    customer_service: { label: 'Customer Service', description: 'Acknowledge support inquiries' },
-    survey: { label: 'Feedback Survey', description: 'Request post-interaction feedback' }
-};
-
-const CUSTOM_TEMPLATE_OPTION = {
-    id: 'custom',
-    label: '✍️ Custom message',
-    description: 'Write your own SMS text'
-};
-
-function buildTemplateOption(templateId) {
-    const meta = TEMPLATE_METADATA[templateId] || {};
-    const label = meta.label || templateId.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-    return {
-        id: templateId,
-        label,
-        description: meta.description || 'Predefined SMS template'
-    };
-}
-
-function extractTemplateVariables(templateText = '') {
-    const matches = templateText.match(/\{(\w+)\}/g) || [];
-    return Array.from(new Set(matches.map((token) => token.replace(/[{}]/g, ''))));
-}
+const {
+    buildTemplateOption,
+    CUSTOM_TEMPLATE_OPTION,
+    extractTemplateVariables,
+    TEMPLATE_METADATA
+} = require('../utils/templates');
 
 // Simple phone number validation
 function isValidPhoneNumber(number) {
@@ -175,12 +150,31 @@ How comfortable is the recipient with technical details?`,
         // Fetch available templates
         let templateChoices = [];
         try {
-            const templateResponse = await axios.get(`${config.apiUrl}/api/sms/templates`);
-            const templateNames = templateResponse.data.available_templates || [];
-            templateChoices = templateNames.map(buildTemplateOption);
+            const templateResponse = await axios.get(`${config.apiUrl}/api/sms/templates`, {
+                params: { include_builtins: true, detailed: true }
+            });
+
+            const builtinTemplates = (templateResponse.data.builtin || []).map((template) => ({
+                id: template.name,
+                label: buildTemplateOption(template.name).label,
+                description: buildTemplateOption(template.name).description,
+                content: template.content,
+                is_builtin: true
+            }));
+
+            const customTemplates = (templateResponse.data.templates || []).map((template) => ({
+                id: template.name,
+                label: `📝 ${template.name}`,
+                description: template.description || 'Custom template',
+                content: template.content,
+                is_builtin: false
+            }));
+
+            templateChoices = [...builtinTemplates, ...customTemplates];
         } catch (templateError) {
             console.error('❌ Failed to fetch SMS templates:', templateError);
-            templateChoices = Object.keys(TEMPLATE_METADATA).map(buildTemplateOption);
+            templateChoices = Object.keys(TEMPLATE_METADATA || {})
+                .map(buildTemplateOption);
         }
 
         templateChoices.push(CUSTOM_TEMPLATE_OPTION);
@@ -216,10 +210,13 @@ Tap an option below to continue.`;
             templateName = templateSelection.id;
 
             try {
-                const templateResponse = await axios.get(`${config.apiUrl}/api/sms/templates/${templateName}`);
-                let templateText = templateResponse.data.template;
-                const originalTemplate = templateResponse.data.original_template || templateText;
-                const placeholders = extractTemplateVariables(originalTemplate);
+                const templateResponse = await axios.get(`${config.apiUrl}/api/sms/templates/${templateName}`, {
+                    params: { detailed: true }
+                });
+
+                const templatePayload = templateResponse.data.template;
+                let templateText = templatePayload?.content || '';
+                const placeholders = extractTemplateVariables(templatePayload?.content || '');
 
                 if (placeholders.length > 0) {
                     await ctx.reply('🧩 This template includes placeholders. Provide values or type skip to leave them unchanged.');
@@ -240,7 +237,6 @@ Tap an option below to continue.`;
                 }
 
                 message = templateText;
-                payload.template_name = templateName;
                 personaSummary.push(`Template: ${templateSelection.label}`);
                 if (Object.keys(templateVariables).length > 0) {
                     personaSummary.push(`Filled variables: ${Object.keys(templateVariables).join(', ')}`);

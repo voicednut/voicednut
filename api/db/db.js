@@ -145,6 +145,20 @@ class EnhancedDatabase {
                 FOREIGN KEY(call_sid) REFERENCES calls(call_sid)
             )`,
 
+            // Reusable call templates for outbound scripts and voices
+            `CREATE TABLE IF NOT EXISTS call_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                description TEXT,
+                business_id TEXT,
+                prompt TEXT,
+                first_message TEXT,
+                persona_config TEXT,
+                voice_model TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )`,
+
             // Enhanced user sessions tracking - FIXED: Added UNIQUE constraint
             `CREATE TABLE IF NOT EXISTS user_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,6 +195,8 @@ class EnhancedDatabase {
             'CREATE INDEX IF NOT EXISTS idx_calls_created_at ON calls(created_at)',
             'CREATE INDEX IF NOT EXISTS idx_calls_twilio_status ON calls(twilio_status)',
             'CREATE INDEX IF NOT EXISTS idx_calls_phone_number ON calls(phone_number)',
+            'CREATE UNIQUE INDEX IF NOT EXISTS idx_call_templates_name ON call_templates(name)',
+            'CREATE INDEX IF NOT EXISTS idx_call_templates_updated_at ON call_templates(updated_at)',
             
             // Transcript indexes for both table names
             'CREATE INDEX IF NOT EXISTS idx_transcripts_call_sid ON call_transcripts(call_sid)',
@@ -218,7 +234,10 @@ class EnhancedDatabase {
             // Session indexes
             'CREATE INDEX IF NOT EXISTS idx_sessions_chat_id ON user_sessions(telegram_chat_id)',
             'CREATE INDEX IF NOT EXISTS idx_sessions_start ON user_sessions(session_start)',
-            'CREATE INDEX IF NOT EXISTS idx_sessions_activity ON user_sessions(last_activity)'
+            'CREATE INDEX IF NOT EXISTS idx_sessions_activity ON user_sessions(last_activity)',
+
+            // Template indexes
+            'CREATE INDEX IF NOT EXISTS idx_sms_templates_name ON sms_templates(name)'
         ];
 
         for (const index of indexes) {
@@ -316,6 +335,175 @@ class EnhancedDatabase {
                     resolve(this.changes);
                 }
             });
+        });
+    }
+
+    formatCallTemplate(row) {
+        if (!row) return null;
+        let personaConfig = null;
+        if (row.persona_config) {
+            try {
+                personaConfig = JSON.parse(row.persona_config);
+            } catch (error) {
+                console.warn('Failed to parse persona_config for call template:', error);
+                personaConfig = null;
+            }
+        }
+
+        return {
+            id: row.id,
+            name: row.name,
+            description: row.description,
+            business_id: row.business_id,
+            prompt: row.prompt,
+            first_message: row.first_message,
+            persona_config: personaConfig,
+            voice_model: row.voice_model,
+            created_at: row.created_at,
+            updated_at: row.updated_at
+        };
+    }
+
+    async getCallTemplates() {
+        return new Promise((resolve, reject) => {
+            this.db.all(
+                `SELECT * FROM call_templates ORDER BY updated_at DESC`,
+                [],
+                (err, rows) => {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve(rows.map((row) => this.formatCallTemplate(row)));
+                    }
+                }
+            );
+        });
+    }
+
+    async getCallTemplateById(id) {
+        return new Promise((resolve, reject) => {
+            this.db.get(
+                `SELECT * FROM call_templates WHERE id = ?`,
+                [id],
+                (err, row) => {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve(this.formatCallTemplate(row));
+                    }
+                }
+            );
+        });
+    }
+
+    async getCallTemplateByName(name) {
+        return new Promise((resolve, reject) => {
+            this.db.get(
+                `SELECT * FROM call_templates WHERE name = ?`,
+                [name],
+                (err, row) => {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve(this.formatCallTemplate(row));
+                    }
+                }
+            );
+        });
+    }
+
+    async createCallTemplate(templateData) {
+        const {
+            name,
+            description,
+            business_id,
+            prompt,
+            first_message,
+            persona_config,
+            voice_model
+        } = templateData;
+
+        const personaJson = persona_config ? JSON.stringify(persona_config) : null;
+
+        return new Promise((resolve, reject) => {
+            const sql = `INSERT INTO call_templates (
+                name, description, business_id, prompt, first_message, persona_config, voice_model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)`;
+
+            this.db.run(
+                sql,
+                [
+                    name,
+                    description || null,
+                    business_id || null,
+                    prompt || null,
+                    first_message || null,
+                    personaJson,
+                    voice_model || null
+                ],
+                function (err) {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve({ id: this.lastID });
+                    }
+                }
+            );
+        });
+    }
+
+    async updateCallTemplate(id, updates) {
+        const fields = [];
+        const values = [];
+
+        const allowedFields = ['name', 'description', 'business_id', 'prompt', 'first_message', 'voice_model'];
+
+        for (const field of allowedFields) {
+            if (updates[field] !== undefined) {
+                fields.push(`${field} = ?`);
+                values.push(updates[field]);
+            }
+        }
+
+        if (updates.persona_config !== undefined) {
+            fields.push(`persona_config = ?`);
+            values.push(updates.persona_config ? JSON.stringify(updates.persona_config) : null);
+        }
+
+        if (fields.length === 0) {
+            return { changes: 0 };
+        }
+
+        fields.push('updated_at = CURRENT_TIMESTAMP');
+
+        values.push(id);
+
+        return new Promise((resolve, reject) => {
+            const sql = `UPDATE call_templates SET ${fields.join(', ')} WHERE id = ?`;
+
+            this.db.run(sql, values, function (err) {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve({ changes: this.changes });
+                }
+            });
+        });
+    }
+
+    async deleteCallTemplate(id) {
+        return new Promise((resolve, reject) => {
+            this.db.run(
+                `DELETE FROM call_templates WHERE id = ?`,
+                [id],
+                function (err) {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve({ changes: this.changes });
+                    }
+                }
+            );
         });
     }
 
@@ -934,6 +1122,8 @@ class EnhancedDatabase {
                body TEXT NOT NULL,
                status TEXT DEFAULT 'queued',
                direction TEXT NOT NULL CHECK(direction IN ('inbound', 'outbound')),
+               template_name TEXT,
+               template_variables TEXT,
                error_code TEXT,
                error_message TEXT,
                ai_response TEXT,
@@ -953,25 +1143,61 @@ class EnhancedDatabase {
                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
            )`;
 
+           const createTemplatesTable = `CREATE TABLE IF NOT EXISTS sms_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                description TEXT,
+                content TEXT NOT NULL,
+                metadata TEXT,
+                is_builtin INTEGER DEFAULT 0,
+                created_by TEXT,
+                updated_by TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )`;
+
            this.db.serialize(() => {
-               this.db.run(createSMSTable, (err) => {
-                   if (err) {
-                       console.error('Error creating SMS table:', err);
+                this.db.run(createSMSTable, (err) => {
+                    if (err) {
+                        console.error('Error creating SMS table:', err);
+                        reject(err);
+                        return;
+                    }
+                    this.db.run('ALTER TABLE sms_messages ADD COLUMN template_name TEXT', (alterErr) => {
+                        if (alterErr && !alterErr.message.includes('duplicate column name')) {
+                            console.error('Error adding template_name column to sms_messages:', alterErr);
+                        }
+                    });
+                    this.db.run('ALTER TABLE sms_messages ADD COLUMN template_variables TEXT', (alterErr) => {
+                        if (alterErr && !alterErr.message.includes('duplicate column name')) {
+                            console.error('Error adding template_variables column to sms_messages:', alterErr);
+                        }
+                    });
+                });
+                
+                this.db.run(createBulkSMSTable, (err) => {
+                    if (err) {
+                        console.error('Error creating bulk SMS table:', err);
                        reject(err);
                        return;
                    }
-               });
-               
-               this.db.run(createBulkSMSTable, (err) => {
-                   if (err) {
-                       console.error('Error creating bulk SMS table:', err);
-                       reject(err);
-                   } else {
-                       console.log('✅ SMS tables created successfully');
-                       resolve();
-                   }
-               });
-           });
+                });
+
+                this.db.run(createTemplatesTable, (err) => {
+                    if (err) {
+                        console.error('Error creating SMS templates table:', err);
+                        reject(err);
+                    } else {
+                        this.db.run('ALTER TABLE sms_templates ADD COLUMN updated_by TEXT', (alterErr) => {
+                            if (alterErr && !alterErr.message.includes('duplicate column name')) {
+                                console.error('Error adding updated_by column to sms_templates:', alterErr);
+                            }
+                        });
+                        console.log('✅ SMS tables created successfully');
+                        resolve();
+                    }
+                });
+            });
        });
    }
 
@@ -979,9 +1205,10 @@ class EnhancedDatabase {
    async saveSMSMessage(messageData) {
        return new Promise((resolve, reject) => {
            const sql = `INSERT INTO sms_messages (
-               message_sid, to_number, from_number, body, status, 
-               direction, ai_response, response_message_sid, user_chat_id
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+               message_sid, to_number, from_number, body, status,
+               direction, template_name, template_variables,
+               ai_response, response_message_sid, user_chat_id
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
            this.db.run(sql, [
                messageData.message_sid,
@@ -990,6 +1217,8 @@ class EnhancedDatabase {
                messageData.body,
                messageData.status || 'queued',
                messageData.direction,
+               messageData.template_name || null,
+               messageData.template_variables ? JSON.stringify(messageData.template_variables) : null,
                messageData.ai_response || null,
                messageData.response_message_sid || null,
                messageData.user_chat_id || null
@@ -1050,6 +1279,121 @@ class EnhancedDatabase {
            });
        });
    }
+
+    async getAllTemplates(options = {}) {
+        const { includeContent = false } = options;
+        const columns = includeContent ? '*' : 'id, name, description, is_builtin, metadata, created_by, created_at, updated_at';
+
+        return new Promise((resolve, reject) => {
+            this.db.all(`SELECT ${columns} FROM sms_templates ORDER BY name`, (err, rows) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    const templates = (rows || []).map((row) => ({
+                        ...row,
+                        metadata: row.metadata ? JSON.parse(row.metadata) : {}
+                    }));
+                    resolve(templates);
+                }
+            });
+        });
+    }
+
+    async getTemplateByName(name) {
+        return new Promise((resolve, reject) => {
+            this.db.get(`SELECT * FROM sms_templates WHERE name = ?`, [name], (err, row) => {
+                if (err) {
+                    reject(err);
+                } else if (!row) {
+                    resolve(null);
+                } else {
+                    row.metadata = row.metadata ? JSON.parse(row.metadata) : {};
+                    resolve(row);
+                }
+            });
+        });
+    }
+
+    async createTemplate(templateData) {
+        return new Promise((resolve, reject) => {
+            const sql = `INSERT INTO sms_templates (name, description, content, metadata, is_builtin, created_by, updated_by)
+                         VALUES (?, ?, ?, ?, ?, ?, ?)`;
+
+            this.db.run(sql, [
+                templateData.name,
+                templateData.description || null,
+                templateData.content,
+                templateData.metadata ? JSON.stringify(templateData.metadata) : null,
+                templateData.is_builtin ? 1 : 0,
+                templateData.created_by || null,
+                templateData.updated_by || templateData.created_by || null
+            ], function (err) {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(this.lastID);
+                }
+            });
+        });
+    }
+
+    async updateTemplate(name, updates) {
+        const fields = [];
+        const values = [];
+
+        if (updates.description !== undefined) {
+            fields.push('description = ?');
+            values.push(updates.description || null);
+        }
+
+        if (updates.content !== undefined) {
+            fields.push('content = ?');
+            values.push(updates.content);
+        }
+
+        if (updates.metadata !== undefined) {
+            fields.push('metadata = ?');
+            values.push(updates.metadata ? JSON.stringify(updates.metadata) : null);
+        }
+
+        if (updates.is_builtin !== undefined) {
+            fields.push('is_builtin = ?');
+            values.push(updates.is_builtin ? 1 : 0);
+        }
+
+        if (updates.updated_by !== undefined) {
+            fields.push('updated_by = ?');
+            values.push(updates.updated_by || null);
+        }
+
+        fields.push('updated_at = CURRENT_TIMESTAMP');
+
+        values.push(name);
+
+        const sql = `UPDATE sms_templates SET ${fields.join(', ')} WHERE name = ?`;
+
+        return new Promise((resolve, reject) => {
+            this.db.run(sql, values, function (err) {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(this.changes);
+                }
+            });
+        });
+    }
+
+    async deleteTemplate(name) {
+        return new Promise((resolve, reject) => {
+            this.db.run(`DELETE FROM sms_templates WHERE name = ? AND is_builtin = 0`, [name], function (err) {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(this.changes);
+                }
+            });
+        });
+    }
 
    // Get SMS messages
    async getSMSMessages(limit = 50, offset = 0) {
