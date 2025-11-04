@@ -8,24 +8,133 @@ class EnhancedDatabase {
         this.dbPath = path.join(__dirname, 'data.db');
     }
 
-    async initialize() {
-        return new Promise((resolve, reject) => {
+    async connect() {
+        if (this.db) {
+            return;
+        }
+
+        await new Promise((resolve, reject) => {
             this.db = new sqlite3.Database(this.dbPath, (err) => {
                 if (err) {
                     console.error('Error opening enhanced database:', err);
                     reject(err);
-                    return;
+                } else {
+                    console.log('Connected to enhanced SQLite database');
+                    resolve();
                 }
-                console.log('Connected to enhanced SQLite database');
-                this.createEnhancedTables().then(() => {
-                    this.initializeSMSTables().then(() => {
-                        this.isInitialized = true;
-                        console.log('✅ Enhanced database initialization complete');
-                        resolve();
-                    }).catch(reject);
-                }).catch(reject);
             });
         });
+    }
+
+    async close() {
+        if (!this.db) {
+            return;
+        }
+
+        await new Promise((resolve, reject) => {
+            this.db.close((err) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    this.db = null;
+                    resolve();
+                }
+            });
+        });
+    }
+
+    async execute(sql, context, options = {}) {
+        const { ignoreErrors = [], successMessage } = options;
+        await new Promise((resolve, reject) => {
+            this.db.run(sql, (err) => {
+                if (err) {
+                    const message = err.message || err.toString();
+                    const shouldIgnore = ignoreErrors.some((pattern) => message.includes(pattern));
+                    if (shouldIgnore) {
+                        console.warn(`⚠️ ${context}: ${message}`);
+                        resolve();
+                        return;
+                    }
+                    console.error(`❌ ${context}: ${message}`);
+                    console.error(`   SQL: ${sql}`);
+                    reject(err);
+                } else {
+                    if (successMessage) {
+                        console.log(successMessage);
+                    }
+                    resolve();
+                }
+            });
+        });
+    }
+
+    async runMigrations() {
+        const migrations = [
+            {
+                name: 'create_call_templates_table',
+                sql: `CREATE TABLE IF NOT EXISTS call_templates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    description TEXT,
+                    business_id TEXT,
+                    prompt TEXT,
+                    first_message TEXT,
+                    persona_config TEXT,
+                    voice_model TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )`
+            },
+            {
+                name: 'create_sms_templates_table',
+                sql: `CREATE TABLE IF NOT EXISTS sms_templates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    description TEXT,
+                    content TEXT NOT NULL,
+                    metadata TEXT,
+                    is_builtin INTEGER DEFAULT 0,
+                    created_by TEXT,
+                    updated_by TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )`
+            },
+            {
+                name: 'idx_call_templates_name',
+                sql: 'CREATE UNIQUE INDEX IF NOT EXISTS idx_call_templates_name ON call_templates(name)'
+            },
+            {
+                name: 'idx_call_templates_updated_at',
+                sql: 'CREATE INDEX IF NOT EXISTS idx_call_templates_updated_at ON call_templates(updated_at)'
+            },
+            {
+                name: 'idx_sms_templates_name',
+                sql: 'CREATE INDEX IF NOT EXISTS idx_sms_templates_name ON sms_templates(name)'
+            }
+        ];
+
+        for (const migration of migrations) {
+            try {
+                await this.execute(
+                    migration.sql,
+                    `migration failed [${migration.name}]`,
+                    { successMessage: `✅ Migration applied: ${migration.name}` }
+                );
+            } catch (error) {
+                error.migration = migration.name;
+                throw error;
+            }
+        }
+    }
+
+    async initialize() {
+        await this.connect();
+        await this.runMigrations();
+        await this.createEnhancedTables();
+        await this.initializeSMSTables();
+        this.isInitialized = true;
+        console.log('✅ Enhanced database initialization complete');
     }
 
     async createEnhancedTables() {
@@ -145,20 +254,6 @@ class EnhancedDatabase {
                 FOREIGN KEY(call_sid) REFERENCES calls(call_sid)
             )`,
 
-            // Reusable call templates for outbound scripts and voices
-            `CREATE TABLE IF NOT EXISTS call_templates (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT UNIQUE NOT NULL,
-                description TEXT,
-                business_id TEXT,
-                prompt TEXT,
-                first_message TEXT,
-                persona_config TEXT,
-                voice_model TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )`,
-
             // Enhanced user sessions tracking - FIXED: Added UNIQUE constraint
             `CREATE TABLE IF NOT EXISTS user_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -195,9 +290,6 @@ class EnhancedDatabase {
             'CREATE INDEX IF NOT EXISTS idx_calls_created_at ON calls(created_at)',
             'CREATE INDEX IF NOT EXISTS idx_calls_twilio_status ON calls(twilio_status)',
             'CREATE INDEX IF NOT EXISTS idx_calls_phone_number ON calls(phone_number)',
-            'CREATE UNIQUE INDEX IF NOT EXISTS idx_call_templates_name ON call_templates(name)',
-            'CREATE INDEX IF NOT EXISTS idx_call_templates_updated_at ON call_templates(updated_at)',
-            
             // Transcript indexes for both table names
             'CREATE INDEX IF NOT EXISTS idx_transcripts_call_sid ON call_transcripts(call_sid)',
             'CREATE INDEX IF NOT EXISTS idx_transcripts_timestamp ON call_transcripts(timestamp)',
@@ -234,10 +326,7 @@ class EnhancedDatabase {
             // Session indexes
             'CREATE INDEX IF NOT EXISTS idx_sessions_chat_id ON user_sessions(telegram_chat_id)',
             'CREATE INDEX IF NOT EXISTS idx_sessions_start ON user_sessions(session_start)',
-            'CREATE INDEX IF NOT EXISTS idx_sessions_activity ON user_sessions(last_activity)',
-
-            // Template indexes
-            'CREATE INDEX IF NOT EXISTS idx_sms_templates_name ON sms_templates(name)'
+            'CREATE INDEX IF NOT EXISTS idx_sessions_activity ON user_sessions(last_activity)'
         ];
 
         for (const index of indexes) {
@@ -1113,92 +1202,69 @@ class EnhancedDatabase {
 
    // Create SMS messages table
    async initializeSMSTables() {
-       return new Promise((resolve, reject) => {
-           const createSMSTable = `CREATE TABLE IF NOT EXISTS sms_messages (
-               id INTEGER PRIMARY KEY AUTOINCREMENT,
-               message_sid TEXT UNIQUE NOT NULL,
-               to_number TEXT,
-               from_number TEXT,
-               body TEXT NOT NULL,
-               status TEXT DEFAULT 'queued',
-               direction TEXT NOT NULL CHECK(direction IN ('inbound', 'outbound')),
-               template_name TEXT,
-               template_variables TEXT,
-               error_code TEXT,
-               error_message TEXT,
-               ai_response TEXT,
-               response_message_sid TEXT,
-               user_chat_id TEXT,
-               created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-               updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-           )`;
+       const tables = [
+           {
+               sql: `CREATE TABLE IF NOT EXISTS sms_messages (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   message_sid TEXT UNIQUE NOT NULL,
+                   to_number TEXT,
+                   from_number TEXT,
+                   body TEXT NOT NULL,
+                   status TEXT DEFAULT 'queued',
+                   direction TEXT NOT NULL CHECK(direction IN ('inbound', 'outbound')),
+                   template_name TEXT,
+                   template_variables TEXT,
+                   error_code TEXT,
+                   error_message TEXT,
+                   ai_response TEXT,
+                   response_message_sid TEXT,
+                   user_chat_id TEXT,
+                   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+               )`,
+               context: 'create sms_messages table'
+           },
+           {
+               sql: `CREATE TABLE IF NOT EXISTS bulk_sms_operations (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   total_recipients INTEGER NOT NULL,
+                   successful INTEGER DEFAULT 0,
+                   failed INTEGER DEFAULT 0,
+                   message TEXT NOT NULL,
+                   user_chat_id TEXT,
+                   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+               )`,
+               context: 'create bulk_sms_operations table'
+           }
+       ];
 
-           const createBulkSMSTable = `CREATE TABLE IF NOT EXISTS bulk_sms_operations (
-               id INTEGER PRIMARY KEY AUTOINCREMENT,
-               total_recipients INTEGER NOT NULL,
-               successful INTEGER DEFAULT 0,
-               failed INTEGER DEFAULT 0,
-               message TEXT NOT NULL,
-               user_chat_id TEXT,
-               created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-           )`;
+       for (const statement of tables) {
+           await this.execute(statement.sql, `${statement.context}`);
+       }
 
-           const createTemplatesTable = `CREATE TABLE IF NOT EXISTS sms_templates (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT UNIQUE NOT NULL,
-                description TEXT,
-                content TEXT NOT NULL,
-                metadata TEXT,
-                is_builtin INTEGER DEFAULT 0,
-                created_by TEXT,
-                updated_by TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )`;
+       const alterations = [
+           {
+               sql: 'ALTER TABLE sms_messages ADD COLUMN template_name TEXT',
+               context: 'add template_name column to sms_messages',
+               ignoreErrors: ['duplicate column name']
+           },
+           {
+               sql: 'ALTER TABLE sms_messages ADD COLUMN template_variables TEXT',
+               context: 'add template_variables column to sms_messages',
+               ignoreErrors: ['duplicate column name']
+           },
+           {
+               sql: 'ALTER TABLE sms_templates ADD COLUMN updated_by TEXT',
+               context: 'add updated_by column to sms_templates',
+               ignoreErrors: ['duplicate column name', 'no such table']
+           }
+       ];
 
-           this.db.serialize(() => {
-                this.db.run(createSMSTable, (err) => {
-                    if (err) {
-                        console.error('Error creating SMS table:', err);
-                        reject(err);
-                        return;
-                    }
-                    this.db.run('ALTER TABLE sms_messages ADD COLUMN template_name TEXT', (alterErr) => {
-                        if (alterErr && !alterErr.message.includes('duplicate column name')) {
-                            console.error('Error adding template_name column to sms_messages:', alterErr);
-                        }
-                    });
-                    this.db.run('ALTER TABLE sms_messages ADD COLUMN template_variables TEXT', (alterErr) => {
-                        if (alterErr && !alterErr.message.includes('duplicate column name')) {
-                            console.error('Error adding template_variables column to sms_messages:', alterErr);
-                        }
-                    });
-                });
-                
-                this.db.run(createBulkSMSTable, (err) => {
-                    if (err) {
-                        console.error('Error creating bulk SMS table:', err);
-                       reject(err);
-                       return;
-                   }
-                });
+       for (const alteration of alterations) {
+           await this.execute(alteration.sql, alteration.context, { ignoreErrors: alteration.ignoreErrors });
+       }
 
-                this.db.run(createTemplatesTable, (err) => {
-                    if (err) {
-                        console.error('Error creating SMS templates table:', err);
-                        reject(err);
-                    } else {
-                        this.db.run('ALTER TABLE sms_templates ADD COLUMN updated_by TEXT', (alterErr) => {
-                            if (alterErr && !alterErr.message.includes('duplicate column name')) {
-                                console.error('Error adding updated_by column to sms_templates:', alterErr);
-                            }
-                        });
-                        console.log('✅ SMS tables created successfully');
-                        resolve();
-                    }
-                });
-            });
-       });
+       console.log('✅ SMS tables verified successfully');
    }
 
    // Save SMS message

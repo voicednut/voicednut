@@ -98,6 +98,9 @@ async function startServer() {
     });
 
   } catch (error) {
+    if (error.migration) {
+      console.error(`❌ Failed to start server: database migration failed during "${error.migration}"`);
+    }
     console.error('❌ Failed to start server:', error);
     process.exit(1);
   }
