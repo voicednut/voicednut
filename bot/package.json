@@ -20,7 +20,7 @@
     "validate:config": "node scripts/validate-config.js"
   },
   "dependencies": {
-    "@grammyjs/conversations": "^1.2.1",
+    "@grammyjs/conversations": "^1.2.0",
     "axios": "^1.6.2",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",

@@ -2,8 +2,7 @@ module.exports = {
   apps: [
     {
       name: 'BOT',
-      script: './pm2-start.sh',
-      interpreter: '/bin/bash',
+      script: './bot.js',
       cwd: '/home/ubuntu/voicednut/bot',
       instances: 1, // ✅ Single instance
       exec_mode: 'fork',
