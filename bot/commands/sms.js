@@ -2,6 +2,12 @@ const config = require('../config');
 const axios = require('axios');
 const { getUser, isAdmin } = require('../db/db');
 const {
+    startOperation,
+    ensureOperationActive,
+    registerAbortController,
+    OperationCancelledError
+} = require('../utils/sessionState');
+const {
     BUSINESS_OPTIONS,
     MOOD_OPTIONS,
     URGENCY_OPTIONS,
@@ -25,10 +31,64 @@ function isValidPhoneNumber(number) {
 
 // SMS sending flow (UNCHANGED - already working)
 async function smsFlow(conversation, ctx) {
+    const opId = startOperation(ctx, 'sms');
+    const ensureActive = () => ensureOperationActive(ctx, opId);
+    const waitForMessage = async () => {
+        const update = await conversation.wait();
+        ensureActive();
+        return update;
+    };
+    const guardedPost = async (url, data, options = {}) => {
+        const controller = new AbortController();
+        const release = registerAbortController(ctx, controller);
+        try {
+            const response = await axios.post(url, data, { timeout: 120000, signal: controller.signal, ...options });
+            ensureActive();
+            return response;
+        } finally {
+            release();
+        }
+    };
+    const askWithGuard = async (...params) => {
+        const result = await askOptionWithButtons(...params);
+        ensureActive();
+        return result;
+    };
+    const guardedGet = async (url, options = {}) => {
+        const controller = new AbortController();
+        const release = registerAbortController(ctx, controller);
+        try {
+            const response = await axios.get(url, { timeout: 20000, signal: controller.signal, ...options });
+            ensureActive();
+            return response;
+        } finally {
+            release();
+        }
+    };
+    const guardedPost = async (url, data, options = {}) => {
+        const controller = new AbortController();
+        const release = registerAbortController(ctx, controller);
+        try {
+            const response = await axios.post(url, data, { timeout: 30000, signal: controller.signal, ...options });
+            ensureActive();
+            return response;
+        } finally {
+            release();
+        }
+    };
+
     try {
+        ensureActive();
+        const user = await new Promise((resolve) => getUser(ctx.from.id, resolve));
+        ensureActive();
+        if (!user) {
+            await ctx.reply('❌ You are not authorized to use this bot.');
+            return;
+        }
+
         await ctx.reply('📱 Enter phone number (E.164 format, e.g., +1234567890):');
 
-        const numMsg = await conversation.wait();
+        const numMsg = await waitForMessage();
         const number = numMsg?.message?.text?.trim();
 
         if (!number) return ctx.reply('❌ Please provide a phone number.');
@@ -36,7 +96,7 @@ async function smsFlow(conversation, ctx) {
             return ctx.reply('❌ Invalid phone number format. Use E.164 format: +1234567890');
         }
 
-        const selectedBusiness = await askOptionWithButtons(
+        const selectedBusiness = await askWithGuard(
             conversation,
             ctx,
             `🎭 *Select SMS persona:*
@@ -71,7 +131,7 @@ Choose the business profile for this message.`,
             selectedPurpose = availablePurposes.find((p) => p.id === selectedBusiness.defaultPurpose) || availablePurposes[0];
 
             if (availablePurposes.length > 1) {
-                selectedPurpose = await askOptionWithButtons(
+                selectedPurpose = await askWithGuard(
                     conversation,
                     ctx,
                     `🎯 *Choose message purpose:*
@@ -93,7 +153,7 @@ This helps set tone and urgency automatically.`,
                 payload.purpose = selectedPurpose.id;
             }
 
-            const moodSelection = await askOptionWithButtons(
+            const moodSelection = await askWithGuard(
                 conversation,
                 ctx,
                 `🎙️ *Tone preference*
@@ -109,7 +169,7 @@ Recommended: *${getOptionLabel(MOOD_OPTIONS, recommendedEmotion)}*.`,
                 personaSummary.push(`Tone: ${moodSelection.label} (${getOptionLabel(MOOD_OPTIONS, recommendedEmotion)})`);
             }
 
-            const urgencySelection = await askOptionWithButtons(
+            const urgencySelection = await askWithGuard(
                 conversation,
                 ctx,
                 `⏱️ *Urgency level*
@@ -125,7 +185,7 @@ Recommended: *${getOptionLabel(URGENCY_OPTIONS, recommendedUrgency)}*.`,
                 personaSummary.push(`Urgency: ${urgencySelection.label} (${getOptionLabel(URGENCY_OPTIONS, recommendedUrgency)})`);
             }
 
-            const techSelection = await askOptionWithButtons(
+            const techSelection = await askWithGuard(
                 conversation,
                 ctx,
                 `🧠 *Recipient technical level:*
@@ -150,7 +210,7 @@ How comfortable is the recipient with technical details?`,
         // Fetch available templates
         let templateChoices = [];
         try {
-            const templateResponse = await axios.get(`${config.apiUrl}/api/sms/templates`, {
+            const templateResponse = await guardedGet(`${config.apiUrl}/api/sms/templates`, {
                 params: { include_builtins: true, detailed: true }
             });
 
@@ -180,7 +240,7 @@ How comfortable is the recipient with technical details?`,
         templateChoices.push(CUSTOM_TEMPLATE_OPTION);
 
         const templateListText = templateChoices
-            .map((option) => `• ${option.label}${option.description ? ` – ${option.description}` : ''}`)
+            .map((option) => `• ${option.label}${option.description ? ` - ${option.description}` : ''}`)
             .join('\n');
 
         const templatePrompt = `📝 *Choose SMS template:*
@@ -188,7 +248,7 @@ ${templateListText}
 
 Tap an option below to continue.`;
 
-        templateSelection = await askOptionWithButtons(
+        templateSelection = await askWithGuard(
             conversation,
             ctx,
             templatePrompt,
@@ -198,7 +258,7 @@ Tap an option below to continue.`;
 
         if (templateSelection.id === 'custom') {
             await ctx.reply('💬 Enter the SMS message (max 1600 characters):');
-            const msgContent = await conversation.wait();
+            const msgContent = await waitForMessage();
             message = msgContent?.message?.text?.trim();
 
             if (!message) return ctx.reply('❌ Please provide a message.');
@@ -210,7 +270,7 @@ Tap an option below to continue.`;
             templateName = templateSelection.id;
 
             try {
-                const templateResponse = await axios.get(`${config.apiUrl}/api/sms/templates/${templateName}`, {
+                const templateResponse = await guardedGet(`${config.apiUrl}/api/sms/templates/${templateName}`, {
                     params: { detailed: true }
                 });
 
@@ -223,7 +283,7 @@ Tap an option below to continue.`;
 
                     for (const token of placeholders) {
                         await ctx.reply(`✏️ Enter value for *${token}* (type skip to leave as is):`, { parse_mode: 'Markdown' });
-                        const valueMsg = await conversation.wait();
+                        const valueMsg = await waitForMessage();
                         const value = valueMsg?.message?.text?.trim();
 
                         if (value && value.toLowerCase() !== 'skip') {
@@ -246,7 +306,7 @@ Tap an option below to continue.`;
                 await ctx.reply('⚠️ Could not load the selected template. Please type a custom message instead.');
 
                 await ctx.reply('💬 Enter the SMS message (max 1600 characters):');
-                const msgContent = await conversation.wait();
+                const msgContent = await waitForMessage();
                 message = msgContent?.message?.text?.trim();
 
                 if (!message) return ctx.reply('❌ Please provide a message.');
@@ -289,21 +349,22 @@ Tap an option below to continue.`;
 
         await ctx.reply(summaryLines.join('\n'), { parse_mode: 'Markdown' });
 
-        const response = await axios.post(`${config.apiUrl}/api/sms/send`, {
+        const response = await guardedPost(`${config.apiUrl}/api/sms/send`, {
             ...payload,
             message,
         }, {
-            headers: { 'Content-Type': 'application/json' },
-            timeout: 30000
+            headers: { 'Content-Type': 'application/json' }
         });
 
-        if (response.data.success) {
+        const data = response?.data || {};
+
+        if (data.success) {
             const successMsg =
                 `✅ *SMS Sent Successfully!*\n\n` +
-                `📱 To: ${response.data.to}\n` +
-                `🆔 Message SID: \`${response.data.message_sid}\`\n` +
-                `📊 Status: ${response.data.status}\n` +
-                `📤 From: ${response.data.from}\n\n` +
+                `📱 To: ${data.to}\n` +
+                `🆔 Message SID: \`${data.message_sid}\`\n` +
+                `📊 Status: ${data.status}\n` +
+                `📤 From: ${data.from}\n\n` +
                 `🔔 You'll receive delivery notifications`;
 
             await ctx.reply(successMsg, { parse_mode: 'Markdown' });
@@ -311,6 +372,10 @@ Tap an option below to continue.`;
             await ctx.reply('⚠️ SMS was sent but response format unexpected. Check logs.');
         }
     } catch (error) {
+        if (error instanceof OperationCancelledError || error?.name === 'AbortError' || error?.name === 'CanceledError') {
+            console.log('SMS flow cancelled');
+            return;
+        }
         console.error('SMS send error:', error);
         if (error.response) {
             console.error('SMS send error response data:', error.response.data);
@@ -337,12 +402,35 @@ Tap an option below to continue.`;
     }
 }
 
-// Bulk SMS flow (UNCHANGED - already working)
+// Bulk SMS flow
 async function bulkSmsFlow(conversation, ctx) {
+    const opId = startOperation(ctx, 'bulk-sms');
+    const ensureActive = () => ensureOperationActive(ctx, opId);
+    const waitForMessage = async () => {
+        const update = await conversation.wait();
+        ensureActive();
+        return update;
+    };
+
     try {
+        ensureActive();
+        const user = await new Promise((resolve) => getUser(ctx.from.id, resolve));
+        ensureActive();
+        if (!user) {
+            await ctx.reply('❌ You are not authorized to use this bot.');
+            return;
+        }
+
+        const adminStatus = await new Promise((resolve) => isAdmin(ctx.from.id, resolve));
+        ensureActive();
+        if (!adminStatus) {
+            await ctx.reply('❌ Bulk SMS is for administrators only.');
+            return;
+        }
+
         await ctx.reply('📱 Enter phone numbers separated by commas or newlines (max 100):');
 
-        const numbersMsg = await conversation.wait();
+        const numbersMsg = await waitForMessage();
         const numbersText = numbersMsg?.message?.text?.trim();
 
         if (!numbersText) return ctx.reply('❌ Please provide phone numbers.');
@@ -363,7 +451,7 @@ async function bulkSmsFlow(conversation, ctx) {
         }
 
         await ctx.reply(`💬 Enter the message to send to ${numbers.length} recipients (max 1600 chars):`);
-        const msgContent = await conversation.wait();
+        const msgContent = await waitForMessage();
         const message = msgContent?.message?.text?.trim();
 
         if (!message) return ctx.reply('❌ Please provide a message.');
@@ -388,13 +476,14 @@ async function bulkSmsFlow(conversation, ctx) {
             options: { delay: 1000, batchSize: 10 }
         };
 
-        const response = await axios.post(`${config.apiUrl}/api/sms/bulk`, payload, {
-            headers: { 'Content-Type': 'application/json' },
-            timeout: 120000
+        const response = await guardedPost(`${config.apiUrl}/api/sms/bulk`, payload, {
+            headers: { 'Content-Type': 'application/json' }
         });
 
-        if (response.data.success) {
-            const result = response.data;
+        const data = response?.data || {};
+
+        if (data.success) {
+            const result = data;
             const successMsg =
                 `✅ *Bulk SMS Completed!*\n\n` +
                 `👥 Total Recipients: ${result.total}\n` +
@@ -419,6 +508,10 @@ async function bulkSmsFlow(conversation, ctx) {
             await ctx.reply('⚠️ Bulk SMS completed but response format unexpected.');
         }
     } catch (error) {
+        if (error instanceof OperationCancelledError || error?.name === 'AbortError' || error?.name === 'CanceledError') {
+            console.log('Bulk SMS flow cancelled');
+            return;
+        }
         console.error('Bulk SMS error:', error);
         let errorMsg = '❌ *Bulk SMS Failed*\n\n';
         errorMsg += error.response ? `Error: ${error.response.data?.error || 'Unknown error'}` : `Error: ${error.message}`;
@@ -428,9 +521,36 @@ async function bulkSmsFlow(conversation, ctx) {
 
 // Schedule SMS flow (UNCHANGED - already working)
 async function scheduleSmsFlow(conversation, ctx) {
+    const opId = startOperation(ctx, 'schedule-sms');
+    const ensureActive = () => ensureOperationActive(ctx, opId);
+    const waitForMessage = async () => {
+        const update = await conversation.wait();
+        ensureActive();
+        return update;
+    };
+    const guardedPost = async (url, data, options = {}) => {
+        const controller = new AbortController();
+        const release = registerAbortController(ctx, controller);
+        try {
+            const response = await axios.post(url, data, { timeout: 30000, signal: controller.signal, ...options });
+            ensureActive();
+            return response;
+        } finally {
+            release();
+        }
+    };
+
     try {
+        ensureActive();
+        const user = await new Promise((resolve) => getUser(ctx.from.id, resolve));
+        ensureActive();
+        if (!user) {
+            await ctx.reply('❌ You are not authorized to use this bot.');
+            return;
+        }
+
         await ctx.reply('📱 Enter phone number (E.164 format):');
-        const numMsg = await conversation.wait();
+        const numMsg = await waitForMessage();
         const number = numMsg?.message?.text?.trim();
 
         if (!number || !isValidPhoneNumber(number)) {
@@ -438,12 +558,12 @@ async function scheduleSmsFlow(conversation, ctx) {
         }
 
         await ctx.reply('💬 Enter the message:');
-        const msgContent = await conversation.wait();
+        const msgContent = await waitForMessage();
         const message = msgContent?.message?.text?.trim();
         if (!message) return ctx.reply('❌ Please provide a message.');
 
         await ctx.reply('⏰ Enter schedule time (e.g., "2024-12-25 14:30" or "in 2 hours"):');
-        const timeMsg = await conversation.wait();
+        const timeMsg = await waitForMessage();
         const timeText = timeMsg?.message?.text?.trim();
         if (!timeText) return ctx.reply('❌ Please provide a schedule time.');
 
@@ -487,22 +607,27 @@ async function scheduleSmsFlow(conversation, ctx) {
             user_chat_id: ctx.from.id.toString()
         };
 
-        const response = await axios.post(`${config.apiUrl}/api/sms/schedule`, payload, {
-            headers: { 'Content-Type': 'application/json' },
-            timeout: 30000
+        const response = await guardedPost(`${config.apiUrl}/api/sms/schedule`, payload, {
+            headers: { 'Content-Type': 'application/json' }
         });
 
-        if (response.data.success) {
+        const data = response?.data || {};
+
+        if (data.success) {
             const successMsg =
                 `✅ *SMS Scheduled Successfully!*\n\n` +
-                `🆔 Schedule ID: \`${response.data.schedule_id}\`\n` +
-                `📅 Will send: ${new Date(response.data.scheduled_time).toLocaleString()}\n` +
+                `🆔 Schedule ID: \`${data.schedule_id}\`\n` +
+                `📅 Will send: ${data.scheduled_time ? new Date(data.scheduled_time).toLocaleString() : 'unknown'}\n` +
                 `📱 To: ${number}\n\n` +
                 `🔔 You'll receive confirmation when sent`;
 
             await ctx.reply(successMsg, { parse_mode: 'Markdown' });
         }
     } catch (error) {
+        if (error instanceof OperationCancelledError || error?.name === 'AbortError' || error?.name === 'CanceledError') {
+            console.log('Schedule SMS flow cancelled');
+            return;
+        }
         console.error('Schedule SMS error:', error);
         await ctx.reply('❌ Failed to schedule SMS. Please try again.');
     }

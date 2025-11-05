@@ -17,6 +17,14 @@ try {
 const { conversations, createConversation } = conversationsPkg;
 const axios = require('axios');
 const config = require('./config');
+const {
+    initialSessionState,
+    ensureSession,
+    cancelActiveFlow,
+    startOperation,
+    resetSession,
+    OperationCancelledError
+} = require('./utils/sessionState');
 
 // Bot initialization
 const token = config.botToken;
@@ -28,6 +36,10 @@ function wrapConversation(handler, name) {
         try {
             await handler(conversation, ctx);
         } catch (error) {
+            if (error instanceof OperationCancelledError) {
+                console.log(`Conversation ${name} cancelled: ${error.message}`);
+                return;
+            }
             console.error(`Conversation error in ${name}:`, error);
             await ctx.reply('❌ An error occurred during the conversation. Please try again.');
         }
@@ -35,7 +47,33 @@ function wrapConversation(handler, name) {
 }
 
 // IMPORTANT: Add session middleware BEFORE conversations
-bot.use(session({ initial: () => ({}) }));
+bot.use(session({ initial: initialSessionState }));
+
+// Ensure every update touches a session object
+bot.use(async (ctx, next) => {
+    ensureSession(ctx);
+    return next();
+});
+
+// When a new slash command arrives, cancel any active flow first
+bot.use(async (ctx, next) => {
+    const text = ctx.message?.text || ctx.callbackQuery?.data;
+    if (text && text.startsWith('/')) {
+        const command = text.split(' ')[0].toLowerCase();
+        if (command !== '/cancel') {
+            await cancelActiveFlow(ctx, `command:${command}`);
+        }
+        ctx.session.lastCommand = command;
+        ctx.session.currentOp = null;
+    }
+    return next();
+});
+
+bot.command('cancel', async (ctx) => {
+    await cancelActiveFlow(ctx, 'user:/cancel');
+    resetSession(ctx);
+    await ctx.reply('✅ Current action cancelled. Use /menu to start again.');
+});
 
 // Initialize conversations middleware AFTER session
 bot.use(conversations());
@@ -247,12 +285,17 @@ bot.on('callback_query:data', async (ctx) => {
 
         if (conversations[action]) {
             console.log(`Starting conversation: ${conversations[action]}`);
+            await cancelActiveFlow(ctx, `callback:${action}`);
+            startOperation(ctx, action.toLowerCase());
             await ctx.reply(`Starting ${action.toLowerCase()} process...`);
             await ctx.conversation.enter(conversations[action]);
             return;
         }
 
         // Handle direct command actions
+        await cancelActiveFlow(ctx, `callback:${action}`);
+        resetSession(ctx);
+
         switch (action) {
             case 'HELP':
                 await executeHelpCommand(ctx);
@@ -274,6 +317,8 @@ bot.on('callback_query:data', async (ctx) => {
                 break;
                 
             case 'MENU':
+                await cancelActiveFlow(ctx, 'callback:MENU');
+                resetSession(ctx);
                 await executeMenuCommand(ctx, isAdminUser);
                 break;
                 
@@ -785,6 +830,7 @@ bot.api.setMyCommands([
     { command: 'smsconversation', description: 'View SMS conversation' },
     { command: 'guide', description: 'Show detailed usage guide' },
     { command: 'help', description: 'Show available commands' },
+    { command: 'cancel', description: 'Cancel the current action' },
     { command: 'menu', description: 'Show quick action menu' },
     { command: 'health', description: 'Check bot and API health' },
     { command: 'bulksms', description: 'Send bulk SMS (admin only)' },

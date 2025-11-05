@@ -1,5 +1,6 @@
 const { InlineKeyboard } = require('grammy');
 const { getUser, isAdmin } = require('../db/db');
+const { cancelActiveFlow, resetSession } = require('../utils/sessionState');
 const config = require('../config');
 
 module.exports = (bot) => {
@@ -7,6 +8,9 @@ module.exports = (bot) => {
     bot.command('menu', async (ctx) => {
         try {
             // Check user authorization
+            await cancelActiveFlow(ctx, 'command:/menu');
+            resetSession(ctx);
+
             const user = await new Promise(r => getUser(ctx.from.id, r));
             if (!user) {
                 return ctx.reply('❌ You are not authorized to use this bot.');
