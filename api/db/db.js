@@ -190,6 +190,17 @@ class EnhancedDatabase {
                 FOREIGN KEY(call_sid) REFERENCES calls(call_sid)
             )`,
 
+            // Captured DTMF keypad input per call
+            `CREATE TABLE IF NOT EXISTS call_dtmf_inputs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_sid TEXT NOT NULL,
+                digits TEXT NOT NULL,
+                received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                source TEXT,
+                metadata TEXT,
+                FOREIGN KEY(call_sid) REFERENCES calls(call_sid)
+            )`,
+
             // Add backward compatibility table name
             `CREATE TABLE IF NOT EXISTS transcripts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -340,6 +351,10 @@ class EnhancedDatabase {
             'CREATE INDEX IF NOT EXISTS idx_legacy_transcripts_call_sid ON transcripts(call_sid)',
             'CREATE INDEX IF NOT EXISTS idx_legacy_transcripts_timestamp ON transcripts(timestamp)',
             'CREATE INDEX IF NOT EXISTS idx_legacy_transcripts_speaker ON transcripts(speaker)',
+
+            // DTMF indexes
+            'CREATE INDEX IF NOT EXISTS idx_dtmf_call_sid ON call_dtmf_inputs(call_sid)',
+            'CREATE INDEX IF NOT EXISTS idx_dtmf_received_at ON call_dtmf_inputs(received_at)',
             
             // State indexes
             'CREATE INDEX IF NOT EXISTS idx_states_call_sid ON call_states(call_sid)',
@@ -998,20 +1013,85 @@ class EnhancedDatabase {
         });
     }
 
+    async addCallDtmfInput({ call_sid, digits, source = null, metadata = null }) {
+        let metadataValue = metadata;
+        if (metadataValue && typeof metadataValue === 'object') {
+            try {
+                metadataValue = JSON.stringify(metadataValue);
+            } catch (error) {
+                metadataValue = null;
+            }
+        }
+        return new Promise((resolve, reject) => {
+            const stmt = this.db.prepare(`
+                INSERT INTO call_dtmf_inputs (call_sid, digits, source, metadata)
+                VALUES (?, ?, ?, ?)
+            `);
+
+            stmt.run([call_sid, digits, source, metadataValue], function(err) {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(this.lastID);
+                }
+            });
+            stmt.finalize();
+        });
+    }
+
+    async getCallDtmfInputs(call_sid) {
+        return new Promise((resolve, reject) => {
+            const sql = `
+                SELECT * FROM call_dtmf_inputs
+                WHERE call_sid = ?
+                ORDER BY received_at ASC, id ASC
+            `;
+
+            this.db.all(sql, [call_sid], (err, rows) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(rows || []);
+                }
+            });
+        });
+    }
+
+    async getLatestCallDtmfInput(call_sid) {
+        return new Promise((resolve, reject) => {
+            const sql = `
+                SELECT * FROM call_dtmf_inputs
+                WHERE call_sid = ?
+                ORDER BY received_at DESC, id DESC
+                LIMIT 1
+            `;
+
+            this.db.get(sql, [call_sid], (err, row) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(row || null);
+                }
+            });
+        });
+    }
+
     // NEW: Get recent calls with transcripts count (REQUIRED FOR API ENDPOINTS)
     async getRecentCalls(limit = 10, offset = 0) {
         return new Promise((resolve, reject) => {
             const query = `
                 SELECT 
                     c.*,
-                    COUNT(t.id) as transcript_count
+                    COUNT(DISTINCT t.id) as transcript_count,
+                    COUNT(DISTINCT d.id) as dtmf_input_count
                 FROM calls c
                 LEFT JOIN transcripts t ON c.call_sid = t.call_sid
+                LEFT JOIN call_dtmf_inputs d ON c.call_sid = d.call_sid
                 GROUP BY c.call_sid
                 ORDER BY c.created_at DESC
                 LIMIT ? OFFSET ?
             `;
-            
+
             this.db.all(query, [limit, offset], (err, rows) => {
                 if (err) {
                     console.error('Database error in getRecentCalls:', err);
@@ -1971,6 +2051,8 @@ class EnhancedDatabase {
                SELECT 'call_states', COUNT(*) FROM call_states
                UNION ALL
                SELECT 'webhook_notifications', COUNT(*) FROM webhook_notifications
+               UNION ALL
+               SELECT 'call_dtmf_inputs', COUNT(*) FROM call_dtmf_inputs
                UNION ALL
                SELECT 'notification_metrics', COUNT(*) FROM notification_metrics
                UNION ALL

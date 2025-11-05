@@ -177,6 +177,13 @@ function escapeMarkdown(text = '') {
     return text.replace(/([_*[\]()~`>#+=|{}.!\\-])/g, '\\$1');
 }
 
+function escapeHtml(text = '') {
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
 function formatDuration(seconds = 0) {
     if (!seconds || seconds < 1) return 'N/A';
     const minutes = Math.floor(seconds / 60);
@@ -992,27 +999,33 @@ async function executeCallsCommand(ctx) {
 
         console.log(`Successfully fetched ${calls.length} calls from: ${successfulEndpoint}`);
 
-        let message = `📋 *Recent Calls* (${calls.length})\n\n`;
+        let message = `<b>Recent Calls (${calls.length})</b>\n\n`;
 
         calls.forEach((call, index) => {
-            const date = new Date(call.created_at).toLocaleDateString();
-            const duration = call.duration ? `${Math.floor(call.duration/60)}:${String(call.duration%60).padStart(2,'0')}` : 'N/A';
-            const status = call.status || 'Unknown';
-            const phoneNumber = call.phone_number;
+            const dateLabel = escapeHtml(new Date(call.created_at).toLocaleDateString());
+            const durationLabel = escapeHtml(
+                call.duration
+                    ? `${Math.floor(call.duration / 60)}:${String(call.duration % 60).padStart(2, '0')}`
+                    : 'N/A'
+            );
+            const statusLabel = escapeHtml(call.status || 'Unknown');
+            const phoneLabel = escapeHtml(call.phone_number || 'Unknown');
+            const callId = escapeHtml(call.call_sid || 'N/A');
+            const transcriptCount = call.transcript_count || 0;
+            const dtmfCount = call.dtmf_input_count || 0;
 
-            // Escape special characters for Markdown
-            const escapedPhone = phoneNumber.replace(/[^\w\s+]/g, '\\$&');
-            const escapedStatus = status.replace(/[^\w\s]/g, '\\$&');
-
-            message += `${index + 1}\\. 📞 ${escapedPhone}\n`;
-            message += `   🆔 \`${call.call_sid}\`\n`;
-            message += `   📅 ${date} \\| ⏱️ ${duration} \\| 📊 ${escapedStatus}\n`;
-            message += `   💬 ${call.transcript_count || 0} messages\n\n`;
+            message += `${index + 1}. 📞 <b>${phoneLabel}</b>\n`;
+            message += `&nbsp;&nbsp;🆔 <code>${callId}</code>\n`;
+            message += `&nbsp;&nbsp;📅 ${dateLabel} | ⏱️ ${durationLabel} | 📊 ${statusLabel}\n`;
+            if (dtmfCount > 0) {
+                message += `&nbsp;&nbsp;🔢 Keypad entries: ${dtmfCount}\n`;
+            }
+            message += `&nbsp;&nbsp;💬 ${transcriptCount} message${transcriptCount === 1 ? '' : 's'}\n\n`;
         });
 
-        message += `Use /transcript <call\\_sid> to view details`;
+        message += 'Use /transcript &lt;call_id&gt; to view details';
 
-        await ctx.reply(message, { parse_mode: 'Markdown' });
+        await ctx.reply(message, { parse_mode: 'HTML' });
 
     } catch (error) {
         console.error('Error fetching calls list via callback:', error);

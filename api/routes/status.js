@@ -302,108 +302,150 @@ class EnhancedWebhookService {
     try {
       const callDetails = await this.db.getCall(call_sid);
       const transcripts = await this.db.getCallTranscripts(call_sid);
+      const dtmfInputs = await this.db.getCallDtmfInputs(call_sid);
       
       if (!callDetails || !transcripts || transcripts.length === 0) {
         await this.sendTelegramMessage(telegram_chat_id, '📋 No transcript available for this call');
         return true;
       }
 
-      // Enhanced transcript header with call details
-      let message = `📋 *Call Transcript*\n\n`;
-      
-      // Call information
-      message += `📞 *Phone:* ${callDetails.phone_number}\n`;
-      
-      // Enhanced duration display
+      const sections = [];
+      sections.push('<b>Call Transcript</b>');
+      sections.push('');
+      sections.push(`<b>Phone:</b> ${this.escapeHtml(callDetails.phone_number || 'Unknown')}`);
+
       if (callDetails.duration && callDetails.duration > 0) {
         const minutes = Math.floor(callDetails.duration / 60);
         const seconds = callDetails.duration % 60;
-        message += `⏱️ *Duration:* ${minutes}:${String(seconds).padStart(2, '0')}\n`;
+        sections.push(`<b>Duration:</b> ${minutes}:${String(seconds).padStart(2, '0')}`);
       }
-      
-      // Call timing if available
-      if (callDetails.started_at && callDetails.ended_at) {
+
+      if (callDetails.started_at) {
         const startTime = new Date(callDetails.started_at).toLocaleTimeString();
-        message += `🕐 *Time:* ${startTime}\n`;
+        sections.push(`<b>Time:</b> ${this.escapeHtml(startTime)}`);
       }
-      
-      message += `💬 *Messages:* ${transcripts.length}\n`;
-      
-      // Add status info with proper emoji
+
+      sections.push(`<b>Messages:</b> ${transcripts.length}`);
+
       if (callDetails.status) {
         const statusEmoji = this.getStatusEmoji(callDetails.status);
-        message += `📊 *Status:* ${statusEmoji} ${callDetails.status}\n`;
+        sections.push(`<b>Status:</b> ${statusEmoji} ${this.escapeHtml(callDetails.status)}`);
       }
-      
-      message += `\n*Conversation:*\n`;
-      message += `${'─'.repeat(25)}\n`;
 
-      // Process conversation with better formatting
-      const maxMessages = 12; // Show more messages
-      let conversationLength = 0;
-      
+      if (dtmfInputs && dtmfInputs.length > 0) {
+        const keypadLines = dtmfInputs.map((input, index) => {
+          const timestamp = input.received_at ? new Date(input.received_at).toLocaleTimeString() : null;
+          const timeSuffix = timestamp ? ` <i>(${this.escapeHtml(timestamp)})</i>` : '';
+          return `&#8226; <code>${this.escapeHtml(input.digits)}</code>${timeSuffix}`;
+        });
+        sections.push('');
+        sections.push('<b>Keypad Entries:</b>');
+        sections.push(keypadLines.join('<br>'));
+      }
+
+      sections.push('');
+      sections.push('<b>Conversation:</b>');
+
+      const maxMessages = 12;
       for (let i = 0; i < Math.min(transcripts.length, maxMessages); i++) {
-        const t = transcripts[i];
-        const speaker = t.speaker === 'user' ? '👤 *Customer*' : '🤖 *AI*';
-        const cleanMessage = this.cleanMessageForTelegram(t.message);
-        const messageText = `${speaker}: ${cleanMessage}\n\n`;
-        
-        // Check if adding this message would exceed Telegram's limit
-        if ((message + messageText).length > 3800) {
-          message += `_... conversation continues (${transcripts.length - i} more messages)_\n`;
-          break;
-        }
-        
-        message += messageText;
-        conversationLength++;
+        const entry = transcripts[i];
+        const speakerLabel = entry.speaker === 'user' ? '👤 <b>Customer</b>' : '🤖 <b>AI</b>';
+        const timestamp = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : null;
+        const timeLine = timestamp ? ` <i>(${this.escapeHtml(timestamp)})</i>` : '';
+        const formattedMessage = this.formatHtmlLines(entry.message || '');
+        sections.push(`${speakerLabel}${timeLine}: ${formattedMessage}`);
       }
 
-      if (transcripts.length > maxMessages && conversationLength === maxMessages) {
-        message += `_... and ${transcripts.length - maxMessages} more messages_\n\n`;
-        message += `Use \`/transcript ${call_sid}\` for full details`;
+      if (transcripts.length > maxMessages) {
+        sections.push(`<i>… and ${transcripts.length - maxMessages} more messages</i>`);
+        sections.push(`Use <code>/transcript ${this.escapeHtml(call_sid)}</code> for full details`);
       }
 
-      // Add call summary if available
       if (callDetails.call_summary) {
-        message += `\n📝 *Summary:* ${callDetails.call_summary}`;
+        sections.push('');
+        sections.push(`<b>Summary:</b> ${this.formatHtmlLines(callDetails.call_summary)}`);
       }
 
-      // Split and send message if too long
-      if (message.length > 4000) {
-        const chunks = this.splitMessage(message, 3900);
+      const htmlMessage = sections.join('<br>');
+
+      if (htmlMessage.length > 4000) {
+        const chunks = this.splitMessage(htmlMessage, 3900);
         for (let i = 0; i < chunks.length; i++) {
-          await this.sendTelegramMessage(telegram_chat_id, chunks[i], true); // Enable markdown
+          await this.sendTelegramMessage(telegram_chat_id, chunks[i], 'HTML');
           if (i < chunks.length - 1) {
-            await this.delay(1500); // Longer delay for better UX
+            await this.delay(1500);
           }
         }
       } else {
-        await this.sendTelegramMessage(telegram_chat_id, message, true); // Enable markdown
+        await this.sendTelegramMessage(telegram_chat_id, htmlMessage, 'HTML');
       }
 
       console.log(`✅ Sent enhanced transcript for call ${call_sid}`.green);
-      
-      // Log transcript metric
+
       if (this.db && this.db.logNotificationMetric) {
         await this.db.logNotificationMetric('call_transcript', true);
       }
-      
+
       return true;
-      
+
     } catch (error) {
       console.error('❌ Failed to send enhanced call transcript:', error);
-      
-      // Log failed transcript metric
+
       if (this.db && this.db.logNotificationMetric) {
         await this.db.logNotificationMetric('call_transcript', false);
       }
-      
+
       try {
         await this.sendTelegramMessage(telegram_chat_id, '❌ Error retrieving call transcript');
       } catch (fallbackError) {
         console.error('Failed to send error message:', fallbackError);
       }
-      
+
+      return false;
+    }
+  }
+
+  async sendCallInputNotification(call_sid, telegram_chat_id) {
+    try {
+      const latestInput = await this.db.getLatestCallDtmfInput(call_sid);
+
+      if (!latestInput) {
+        await this.sendTelegramMessage(telegram_chat_id, '🔢 Keypad entry detected but no digits were recorded.');
+        return true;
+      }
+
+      const timestamp = latestInput.received_at ? new Date(latestInput.received_at).toLocaleTimeString() : null;
+      const sourceLabel = latestInput.source ? latestInput.source.toUpperCase() : 'UNKNOWN';
+
+      const sections = [];
+      sections.push('🔢 <b>Keypad Entry Captured</b>');
+      sections.push('');
+      sections.push(`<b>Digits:</b> <code>${this.escapeHtml(latestInput.digits)}</code>`);
+
+      if (timestamp) {
+        sections.push(`<b>Received:</b> ${this.escapeHtml(timestamp)}`);
+      }
+
+      sections.push(`<b>Source:</b> ${this.escapeHtml(sourceLabel)}`);
+      sections.push('');
+      sections.push('<i>The customer entered these digits on their phone keypad during the call.</i>');
+
+      await this.sendTelegramMessage(telegram_chat_id, sections.join('<br>'), 'HTML');
+
+      if (this.db && this.db.logNotificationMetric) {
+        await this.db.logNotificationMetric('call_input_dtmf', true);
+      }
+      return true;
+    } catch (error) {
+      console.error('❌ Failed to send keypad input notification:', error);
+      if (this.db && this.db.logNotificationMetric) {
+        await this.db.logNotificationMetric('call_input_dtmf', false);
+      }
+      try {
+        await this.sendTelegramMessage(telegram_chat_id, '❌ Error delivering keypad entry details');
+      } catch (fallbackError) {
+        console.error('Failed to send fallback keypad message:', fallbackError);
+      }
       return false;
     }
   }
@@ -435,6 +477,10 @@ class EnhancedWebhookService {
           break;
         case 'call_transcript':
           success = await this.sendCallTranscript(call_sid, telegram_chat_id);
+          break;
+        case 'call_input_dtmf':
+        case 'call_dtmf_captured':
+          success = await this.sendCallInputNotification(call_sid, telegram_chat_id);
           break;
         case 'call_failed':
           const failedCall = await this.db.getCall(call_sid);
@@ -483,7 +529,7 @@ class EnhancedWebhookService {
   }
 
   // Enhanced Telegram message sending with markdown support
-  async sendTelegramMessage(chatId, message, enableMarkdown = false, replyMarkup = null) {
+  async sendTelegramMessage(chatId, message, parseMode = null, replyMarkup = null) {
     const url = `https://api.telegram.org/bot${this.telegramBotToken}/sendMessage`;
     
     const payload = {
@@ -492,8 +538,15 @@ class EnhancedWebhookService {
       disable_web_page_preview: true
     };
 
-    if (enableMarkdown) {
-      payload.parse_mode = 'Markdown';
+    let resolvedParseMode = null;
+    if (parseMode === true) {
+      resolvedParseMode = 'Markdown';
+    } else if (typeof parseMode === 'string' && parseMode.trim().length > 0) {
+      resolvedParseMode = parseMode;
+    }
+
+    if (resolvedParseMode) {
+      payload.parse_mode = resolvedParseMode;
     }
 
     if (replyMarkup) {
@@ -583,6 +636,18 @@ class EnhancedWebhookService {
       .replace(/[*_`\[\]()~>#+=|{}.!-]/g, '\\$&') // Escape markdown chars
       .replace(/•/g, '') // Remove TTS markers
       .trim();
+  }
+
+  escapeHtml(text = '') {
+    return String(text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  formatHtmlLines(text = '') {
+    return this.escapeHtml(text).replace(/\n/g, '<br>');
   }
 
   splitMessage(message, maxLength) {

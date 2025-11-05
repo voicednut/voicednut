@@ -2,209 +2,184 @@ const config = require('../config');
 const axios = require('axios');
 const { getUser, isAdmin } = require('../db/db');
 
-// Function to escape Telegram Markdown special characters
-function escapeMarkdown(text) {
-  if (!text) return '';
-  // Escape special Markdown characters that could break parsing
-  return text
-    .replace(/\\/g, '\\\\')  // Escape backslashes first
-    .replace(/\*/g, '\\*')   // Escape asterisks
-    .replace(/_/g, '\\_')    // Escape underscores
-    .replace(/\[/g, '\\[')   // Escape square brackets
-    .replace(/\]/g, '\\]')   // Escape square brackets
-    .replace(/\(/g, '\\(')   // Escape parentheses
-    .replace(/\)/g, '\\)')   // Escape parentheses
-    .replace(/~/g, '\\~')    // Escape tildes
-    .replace(/`/g, '\\`')    // Escape backticks
-    .replace(/>/g, '\\>')    // Escape greater than
-    .replace(/#/g, '\\#')    // Escape hash
-    .replace(/\+/g, '\\+')   // Escape plus
-    .replace(/-/g, '\\-')    // Escape minus
-    .replace(/=/g, '\\=')    // Escape equals
-    .replace(/\|/g, '\\|')   // Escape pipes
-    .replace(/\{/g, '\\{')   // Escape curly braces
-    .replace(/\}/g, '\\}')   // Escape curly braces
-    .replace(/\./g, '\\.')   // Escape dots
-    .replace(/!/g, '\\!');   // Escape exclamation marks
+const MAX_PREVIEW_MESSAGES = 12;
+const MAX_CHUNK_LENGTH = 3800;
+
+function escapeHtml(text = '') {
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
 }
 
-// Function to get call transcript
-async function getTranscript(ctx, callSid) {
-  try {
-    console.log(`Fetching transcript for call: ${callSid}`);
-    const response = await axios.get(`${config.apiUrl}/api/calls/${callSid}`, {
-      timeout: 15000
-    });
-
-    const { call, transcripts } = response.data;
-
-    if (!call) {
-      return ctx.reply('❌ Call not found');
+function formatDuration(seconds) {
+    if (!seconds || Number.isNaN(seconds)) {
+        return 'Unknown';
     }
-
-    if (!transcripts || transcripts.length === 0) {
-      return ctx.reply(`📋 *Call Details*\n\n📞 ${escapeMarkdown(call.phone_number)}\n🆔 \`${callSid}\`\n📊 Status: ${escapeMarkdown(call.status || 'Unknown')}\n\n❌ No transcript available yet`, {
-        parse_mode: 'Markdown'
-      });
-    }
-
-    // Format transcript with proper escaping
-    let message = `📋 *Call Transcript*\n\n`;
-    message += `📞 Number: ${escapeMarkdown(call.phone_number)}\n`;
-    message += `⏱️ Duration: ${call.duration ? Math.floor(call.duration/60) + ':' + String(call.duration%60).padStart(2,'0') : 'Unknown'}\n`;
-    message += `📊 Status: ${escapeMarkdown(call.status || 'Unknown')}\n`;
-    message += `💬 Messages: ${transcripts.length}\n\n`;
-
-    if (call.call_summary) {
-      message += `📝 *Summary:*\n${escapeMarkdown(call.call_summary)}\n\n`;
-    }
-
-    message += `*Conversation:*\n`;
-
-    // Add transcript messages (limit to avoid Telegram message limit)
-    const maxMessages = 10; // Reduced to prevent message length issues
-    for (let i = 0; i < Math.min(transcripts.length, maxMessages); i++) {
-      const t = transcripts[i];
-      const speaker = t.speaker === 'user' ? '👤' : '🤖';
-      const time = new Date(t.timestamp).toLocaleTimeString();
-
-      // Escape the transcript message content
-      const escapedMessage = escapeMarkdown(t.message);
-      
-      message += `\n${speaker} _\\(${time}\\)_\n${escapedMessage}\n`;
-    }
-
-    if (transcripts.length > maxMessages) {
-      message += `\n\\.\\.\\. and ${transcripts.length - maxMessages} more messages`;
-    }
-
-    // Check message length and truncate if needed (Telegram limit is 4096)
-    if (message.length > 3800) {
-      message = message.substring(0, 3700) + '\n\n\\.\\.\\. \\(truncated\\)\n\nUse /fullTranscript for complete transcript';
-    }
-
-    await ctx.reply(message, { parse_mode: 'Markdown' });
-
-  } catch (error) {
-    console.error('Error fetching transcript:', error);
-
-    if (error.response?.status === 404) {
-      await ctx.reply('❌ Call not found or transcript not available yet');
-    } else if (error.name === 'GrammyError' && error.description?.includes('parse entities')) {
-      // If there's still a parsing error, send without markdown
-      await ctx.reply(`❌ Error displaying transcript due to formatting issues. Call SID: ${callSid}\n\nPlease contact support for assistance.`);
-    } else {
-      await ctx.reply('❌ Error fetching transcript. Please try again later.');
-    }
-  }
+    const totalSeconds = Math.max(0, parseInt(seconds, 10));
+    const minutes = Math.floor(totalSeconds / 60);
+    const remainder = totalSeconds % 60;
+    return `${minutes}:${String(remainder).padStart(2, '0')}`;
 }
 
-// Function to get calls list with better formatting
-async function getCallsList(ctx, limit = 10) {
-    // Use the correct API endpoint structure
+function formatTimestamp(value) {
+    if (!value) return 'Unknown time';
     try {
-        console.log('Executing calls command via callback...');
-        
-        let response;
-        let calls = [];
-        
-        // Try multiple API endpoints in order of preference
+        return new Date(value).toLocaleTimeString();
+    } catch (error) {
+        return 'Unknown time';
+    }
+}
+
+async function getTranscript(ctx, callSid) {
+    try {
+        const response = await axios.get(`${config.apiUrl}/api/calls/${callSid}`, {
+            timeout: 15000
+        });
+
+        const { call, transcripts = [], dtmf_inputs: dtmfInputs = [] } = response.data || {};
+
+        if (!call) {
+            await ctx.reply('❌ Call not found');
+            return;
+        }
+
+        if (!transcripts.length) {
+            let message = `<b>Call Details</b>\n\n`;
+            message += `📞 Phone: <b>${escapeHtml(call.phone_number)}</b>\n`;
+            message += `🆔 Call ID: <code>${escapeHtml(callSid)}</code>\n`;
+            message += `⏱️ Duration: ${formatDuration(call.duration)}\n`;
+            message += `📊 Status: ${escapeHtml(call.status || 'Unknown')}\n`;
+            if (dtmfInputs.length) {
+                message += `🔢 Keypad Input:\n`;
+                dtmfInputs.forEach((input, index) => {
+                    const timestamp = formatTimestamp(input.received_at);
+                    message += `• <code>${escapeHtml(input.digits)}</code> (${escapeHtml(timestamp)})\n`;
+                });
+            }
+            message += `\n❌ No transcript available yet.`;
+
+            await ctx.reply(message, { parse_mode: 'HTML' });
+            return;
+        }
+
+        let message = `<b>Call Transcript</b>\n\n`;
+        message += `📞 Phone: <b>${escapeHtml(call.phone_number)}</b>\n`;
+        message += `🆔 Call ID: <code>${escapeHtml(callSid)}</code>\n`;
+        message += `⏱️ Duration: ${formatDuration(call.duration)}\n`;
+        message += `📊 Status: ${escapeHtml(call.status || 'Unknown')}\n`;
+        message += `💬 Messages: ${transcripts.length}\n`;
+        if (dtmfInputs.length) {
+            message += `🔢 Keypad Inputs:\n`;
+            dtmfInputs.forEach((input) => {
+                const timestamp = formatTimestamp(input.received_at);
+                message += `• <code>${escapeHtml(input.digits)}</code> (${escapeHtml(timestamp)})\n`;
+            });
+        }
+
+        if (call.call_summary) {
+            message += `\n<b>Summary</b>\n${escapeHtml(call.call_summary)}\n`;
+        }
+
+        message += `\n<b>Conversation</b>\n`;
+
+        const previewMessages = transcripts.slice(0, MAX_PREVIEW_MESSAGES);
+
+        previewMessages.forEach((entry) => {
+            const speakerLabel = entry.speaker === 'user' ? '👤 User' : '🤖 AI';
+            const timestamp = formatTimestamp(entry.timestamp);
+            message += `\n<b>${speakerLabel}</b> <i>${escapeHtml(timestamp)}</i>\n`;
+            message += `${escapeHtml(entry.message)}\n`;
+        });
+
+        if (transcripts.length > previewMessages.length) {
+            const remaining = transcripts.length - previewMessages.length;
+            message += `\n… ${remaining} more message${remaining === 1 ? '' : 's'} (use /fullTranscript ${escapeHtml(callSid)} for full log)`;
+        }
+
+        await ctx.reply(message, { parse_mode: 'HTML' });
+    } catch (error) {
+        console.error('Error fetching transcript:', error);
+
+        if (error.response?.status === 404) {
+            await ctx.reply('❌ Call not found or transcript not ready');
+        } else if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
+            await ctx.reply('❌ Unable to reach API server. Please check the server status.');
+        } else {
+            await ctx.reply('❌ Error fetching transcript. Please try again later.');
+        }
+    }
+}
+
+async function getCallsList(ctx, limit = 10) {
+    try {
         const endpoints = [
-            `${config.apiUrl}/api/calls/list?limit=10`,  // Enhanced endpoint
-            `${config.apiUrl}/api/calls?limit=10`,       // Basic endpoint
+            `${config.apiUrl}/api/calls/list?limit=${limit}`,
+            `${config.apiUrl}/api/calls?limit=${limit}`
         ];
-        
+
+        let calls = [];
         let lastError = null;
-        let successfulEndpoint = null;
-        
+
         for (const endpoint of endpoints) {
             try {
-                console.log(`Trying endpoint: ${endpoint}`);
-                
-                response = await axios.get(endpoint, {
+                const response = await axios.get(endpoint, {
                     timeout: 15000,
                     headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
+                        Accept: 'application/json'
                     }
                 });
 
-                console.log(`Success! API Response status: ${response.status}`);
-                successfulEndpoint = endpoint;
-                
-                // Handle different response structures
-                if (response.data.calls) {
-                    calls = response.data.calls;
-                } else if (Array.isArray(response.data)) {
+                if (Array.isArray(response.data)) {
                     calls = response.data;
-                } else {
-                    console.log('Unexpected response structure:', Object.keys(response.data));
-                    continue; // Try next endpoint
+                } else if (Array.isArray(response.data.calls)) {
+                    calls = response.data.calls;
                 }
-                
-                break; // Success, exit loop
-                
-            } catch (endpointError) {
-                console.log(`Endpoint ${endpoint} failed:`, endpointError.message);
-                lastError = endpointError;
-                continue; // Try next endpoint
-            }
-        }
-        
-        // If all endpoints failed
-        if (!calls || calls.length === 0) {
-            if (lastError) {
-                throw lastError; // Re-throw the last error for proper handling
-            } else {
-                return ctx.reply('📋 No calls found');
+
+                if (calls.length) {
+                    break;
+                }
+            } catch (error) {
+                lastError = error;
             }
         }
 
-        console.log(`Successfully fetched ${calls.length} calls from: ${successfulEndpoint}`);
+        if (!calls.length) {
+            if (lastError) throw lastError;
+            await ctx.reply('📋 No calls found');
+            return;
+        }
 
-        let message = `📋 *Recent Calls* (${calls.length})\n\n`;
+        let message = `<b>Recent Calls (${calls.length})</b>\n\n`;
 
         calls.forEach((call, index) => {
-            const date = new Date(call.created_at).toLocaleDateString();
-            const duration = call.duration ? `${Math.floor(call.duration/60)}:${String(call.duration%60).padStart(2,'0')}` : 'N/A';
-            const status = call.status || 'Unknown';
-            const phoneNumber = call.phone_number;
+            const phone = escapeHtml(call.phone_number || 'Unknown');
+            const status = escapeHtml(call.status || 'Unknown');
+            const callId = escapeHtml(call.call_sid || 'N/A');
+            const createdDate = escapeHtml(call.created_date || (call.created_at ? new Date(call.created_at).toLocaleDateString() : 'Unknown'));
+            const durationLabel = escapeHtml(call.duration_formatted || formatDuration(call.duration));
+            const transcriptCount = call.transcript_count || 0;
+            const dtmfCount = call.dtmf_input_count || 0;
 
-            // Escape special characters for Markdown
-            const escapedPhone = phoneNumber.replace(/[^\w\s+]/g, '\\$&');
-            const escapedStatus = status.replace(/[^\w\s]/g, '\\$&');
-
-            message += `${index + 1}\\. 📞 ${escapedPhone}\n`;
-            message += `   🆔 \`${call.call_sid}\`\n`;
-            message += `   📅 ${date} \\| ⏱️ ${duration} \\| 📊 ${escapedStatus}\n`;
-            message += `   💬 ${call.transcript_count || 0} messages\n\n`;
+            message += `${index + 1}. 📞 <b>${phone}</b>\n`;
+            message += `&nbsp;&nbsp;🆔 <code>${callId}</code>\n`;
+            message += `&nbsp;&nbsp;📅 ${createdDate} | ⏱️ ${durationLabel} | 📊 ${status}\n`;
+            if (dtmfCount > 0) {
+                message += `&nbsp;&nbsp;🔢 Keypad entries: ${dtmfCount}\n`;
+            }
+            message += `&nbsp;&nbsp;💬 ${transcriptCount} message${transcriptCount === 1 ? '' : 's'}\n\n`;
         });
 
-        message += `Use /transcript <call\\_sid> to view details`;
+        message += `Use /transcript &lt;call_id&gt; to view details.`;
 
-        await ctx.reply(message, { parse_mode: 'Markdown' });
-
+        await ctx.reply(message, { parse_mode: 'HTML' });
     } catch (error) {
-        console.error('Error fetching calls list via callback:', error);
-        
-        // Provide specific error messages based on error type
+        console.error('Error fetching calls list:', error);
+
         if (error.response?.status === 404) {
-            await ctx.reply(
-                '❌ *API Endpoints Missing*\n\n' +
-                'The calls list endpoints are not available on the server\\.\n\n' +
-                '*Missing endpoints:*\n' +
-                '• `/api/calls` \\- Basic calls listing\n' +
-                '• `/api/calls/list` \\- Enhanced calls listing\n\n' +
-                'Please contact your system administrator to add these endpoints to the Express application\\.',
-                { parse_mode: 'Markdown' }
-            );
+            await ctx.reply('❌ Calls API endpoint not available on the server.');
         } else if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
-            await ctx.reply(
-                `❌ *Server Connection Failed*\n\n` +
-                `Cannot connect to API server at:\n\`${config.apiUrl}\`\n\n` +
-                `Please check if the server is running\\.`,
-                { parse_mode: 'Markdown' }
-            );
+            await ctx.reply(`❌ Unable to reach API server at ${config.apiUrl}`);
         } else if (error.response?.status === 500) {
             await ctx.reply('❌ Server error while fetching calls. Please try again later.');
         } else if (error.response) {
@@ -215,166 +190,154 @@ async function getCallsList(ctx, limit = 10) {
     }
 }
 
+async function sendFullTranscript(ctx, callSid) {
+    try {
+        const response = await axios.get(`${config.apiUrl}/api/calls/${callSid}`, {
+            timeout: 20000
+        });
+
+        const { call, transcripts = [], dtmf_inputs: dtmfInputs = [] } = response.data || {};
+
+        if (!call || !transcripts.length) {
+            await ctx.reply('❌ Call or transcript not found');
+            return;
+        }
+
+        let buffer = `📋 FULL CALL TRANSCRIPT\n\n`;
+        buffer += `📞 Number: ${call.phone_number}\n`;
+        buffer += `🆔 Call ID: ${callSid}\n`;
+        buffer += `⏱️ Duration: ${formatDuration(call.duration)}\n`;
+        buffer += `📊 Status: ${call.status || 'Unknown'}\n`;
+        buffer += `💬 Messages: ${transcripts.length}\n`;
+        if (dtmfInputs.length) {
+            buffer += `🔢 Keypad Inputs:\n`;
+            dtmfInputs.forEach((input) => {
+                buffer += `  - ${input.digits} (${formatTimestamp(input.received_at)})\n`;
+            });
+        }
+        buffer += `\nCONVERSATION:\n`;
+
+        transcripts.forEach((entry) => {
+            const speakerLabel = entry.speaker === 'user' ? '👤 USER' : '🤖 AI';
+            const timestamp = formatTimestamp(entry.timestamp);
+            buffer += `\n${speakerLabel} (${timestamp}):\n${entry.message}\n`;
+        });
+
+        const chunks = [];
+        let remaining = buffer;
+
+        while (remaining.length > MAX_CHUNK_LENGTH) {
+            let splitIndex = remaining.lastIndexOf('\n', MAX_CHUNK_LENGTH);
+            if (splitIndex === -1) {
+                splitIndex = MAX_CHUNK_LENGTH;
+            }
+            chunks.push(remaining.slice(0, splitIndex));
+            remaining = remaining.slice(splitIndex);
+        }
+
+        if (remaining.trim().length) {
+            chunks.push(remaining);
+        }
+
+        for (let i = 0; i < chunks.length; i++) {
+            const suffix = i < chunks.length - 1 ? '\n\n… (continued)' : '';
+            await ctx.reply(chunks[i] + suffix);
+            if (i < chunks.length - 1) {
+                await new Promise((resolve) => setTimeout(resolve, 700));
+            }
+        }
+    } catch (error) {
+        console.error('Full transcript error:', error);
+        if (error.response?.status === 404) {
+            await ctx.reply('❌ Call not found');
+        } else {
+            await ctx.reply('❌ Error fetching full transcript');
+        }
+    }
+}
+
+async function ensureAdmin(ctx) {
+    const user = await new Promise((resolve) => getUser(ctx.from.id, resolve));
+    if (!user) {
+        await ctx.reply('❌ You are not authorized to use this bot.');
+        return false;
+    }
+
+    const adminStatus = await new Promise((resolve) => isAdmin(ctx.from.id, resolve));
+    if (!adminStatus) {
+        await ctx.reply('❌ This command is for administrators only.');
+        return false;
+    }
+
+    return true;
+}
 
 module.exports = (bot) => {
-  // Transcript command
-  bot.command('transcript', async (ctx) => {
-    try {
-      // Check if user is authorized
-      const user = await new Promise(r => getUser(ctx.from.id, r));
-            if (!user) {
-                return ctx.reply('❌ You are not authorized to use this bot.');
+    bot.command('transcript', async (ctx) => {
+        try {
+            if (!(await ensureAdmin(ctx))) {
+                return;
             }
 
-            const adminStatus = await new Promise(r => isAdmin(ctx.from.id, r));
-            if (!adminStatus) {
-                return ctx.reply('❌ This command is for administrators only.');
-            }
-      
-      const args = ctx.message.text.split(' ');
-      
-      if (args.length < 2) {
-        return ctx.reply('📋 Usage: /transcript <call\\_sid>\n\nExample: /transcript CA1234567890abcdef', {
-          parse_mode: 'Markdown'
-        });
-      }
-
-      const callSid = args[1].trim();
-      
-      if (!callSid.startsWith('CA')) {
-        return ctx.reply('❌ Invalid Call SID format. Should start with "CA"');
-      }
-
-      await getTranscript(ctx, callSid);
-    } catch (error) {
-      console.error('Transcript command error:', error);
-      await ctx.reply('❌ Error processing transcript command');
-    }
-  });
-
-  // Calls list command
-  bot.command('calls', async (ctx) => {
-    try {
-      // Check if user is authorized
-      const user = await new Promise(r => getUser(ctx.from.id, r));
-            if (!user) {
-                return ctx.reply('❌ You are not authorized to use this bot.');
+            const parts = ctx.message.text.trim().split(/\s+/);
+            if (parts.length < 2) {
+                await ctx.reply('📋 Usage: /transcript <call_id>\nExample: /transcript CA1234567890abcdef');
+                return;
             }
 
-            const adminStatus = await new Promise(r => isAdmin(ctx.from.id, r));
-            if (!adminStatus) {
-                return ctx.reply('❌ This command is for administrators only.');
+            const callSid = parts[1].trim();
+            if (!/^CA[a-z0-9]+$/i.test(callSid)) {
+                await ctx.reply('❌ Invalid Call SID format. Expected value starting with "CA".');
+                return;
             }
 
-      const args = ctx.message.text.split(' ');
-      const limit = args.length > 1 ? parseInt(args[1]) || 10 : 10;
-      
-      if (limit > 50) {
-        return ctx.reply('❌ Limit cannot exceed 50 calls');
-      }
-
-      if (limit < 1) {
-        return ctx.reply('❌ Limit must be at least 1');
-      }
-
-      await ctx.reply('📋 Fetching recent calls...');
-      await getCallsList(ctx, limit);
-    } catch (error) {
-      console.error('Calls command error:', error);
-      await ctx.reply('❌ Error fetching calls list');
-    }
-  });
-
-  // Full transcript command for longer transcripts
-  bot.command('fullTranscript', async (ctx) => {
-    try {
-      // Check if user is authorized
-      const user = await new Promise(r => getUser(ctx.from.id, r));
-            if (!user) {
-                return ctx.reply('❌ You are not authorized to use this bot.');
-            }
-
-            const adminStatus = await new Promise(r => isAdmin(ctx.from.id, r));
-            if (!adminStatus) {
-                return ctx.reply('❌ This command is for administrators only.');
-            }
-            
-            
-      const args = ctx.message.text.split(' ');
-      
-      if (args.length < 2) {
-        return ctx.reply('📋 Usage: /fullTranscript <call\\_sid>', {
-          parse_mode: 'Markdown'
-        });
-      }
-
-      const callSid = args[1].trim();
-      
-      if (!callSid.startsWith('CA')) {
-        return ctx.reply('❌ Invalid Call SID format. Should start with "CA"');
-      }
-
-      await ctx.reply('📋 Fetching full transcript...');
-
-      // Send without markdown to avoid parsing issues
-      const response = await axios.get(`${config.apiUrl}/api/calls/${callSid}`, {
-        timeout: 15000
-      });
-
-      const { call, transcripts } = response.data;
-
-      if (!call || !transcripts || transcripts.length === 0) {
-        return ctx.reply('❌ Call or transcript not found');
-      }
-
-      // Send as plain text to avoid markdown issues
-      let plainMessage = `📋 FULL CALL TRANSCRIPT\n\n`;
-      plainMessage += `📞 Number: ${call.phone_number}\n`;
-      plainMessage += `🆔 Call ID: ${callSid}\n`;
-      plainMessage += `⏱️ Duration: ${call.duration ? Math.floor(call.duration/60) + ':' + String(call.duration%60).padStart(2,'0') : 'Unknown'}\n`;
-      plainMessage += `📊 Status: ${call.status || 'Unknown'}\n`;
-      plainMessage += `💬 Messages: ${transcripts.length}\n\n`;
-
-      plainMessage += `CONVERSATION:\n`;
-
-      transcripts.forEach((t, index) => {
-        const speaker = t.speaker === 'user' ? '👤 USER' : '🤖 AI';
-        const time = new Date(t.timestamp).toLocaleTimeString();
-        plainMessage += `\n${speaker} (${time}):\n${t.message}\n`;
-      });
-
-      // Split into chunks if too long
-      const chunks = [];
-      let currentChunk = plainMessage;
-      
-      while (currentChunk.length > 4000) {
-        let splitIndex = currentChunk.lastIndexOf('\n', 4000);
-        if (splitIndex === -1) splitIndex = 4000;
-        
-        chunks.push(currentChunk.substring(0, splitIndex));
-        currentChunk = currentChunk.substring(splitIndex);
-      }
-      
-      if (currentChunk.length > 0) {
-        chunks.push(currentChunk);
-      }
-
-      // Send chunks
-      for (let i = 0; i < chunks.length; i++) {
-        await ctx.reply(chunks[i] + (i < chunks.length - 1 ? '\n\n... (continued)' : ''));
-        // Add delay between messages to avoid rate limiting
-        if (i < chunks.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
+            await getTranscript(ctx, callSid);
+        } catch (error) {
+            console.error('Transcript command error:', error);
+            await ctx.reply('❌ Error processing transcript command');
         }
-      }
+    });
 
-    } catch (error) {
-      console.error('Full transcript error:', error);
-      if (error.response?.status === 404) {
-        await ctx.reply('❌ Call not found');
-      } else {
-        await ctx.reply('❌ Error fetching full transcript');
-      }
-    }
-  });
+    bot.command('calls', async (ctx) => {
+        try {
+            if (!(await ensureAdmin(ctx))) {
+                return;
+            }
+
+            const parts = ctx.message.text.trim().split(/\s+/);
+            const limit = parts.length > 1 ? Math.min(Math.max(parseInt(parts[1], 10) || 10, 1), 50) : 10;
+
+            await ctx.reply('📋 Fetching recent calls...');
+            await getCallsList(ctx, limit);
+        } catch (error) {
+            console.error('Calls command error:', error);
+            await ctx.reply('❌ Error fetching calls list');
+        }
+    });
+
+    bot.command('fullTranscript', async (ctx) => {
+        try {
+            if (!(await ensureAdmin(ctx))) {
+                return;
+            }
+
+            const parts = ctx.message.text.trim().split(/\s+/);
+            if (parts.length < 2) {
+                await ctx.reply('📋 Usage: /fullTranscript <call_id>');
+                return;
+            }
+
+            const callSid = parts[1].trim();
+            if (!/^CA[a-z0-9]+$/i.test(callSid)) {
+                await ctx.reply('❌ Invalid Call SID format. Expected value starting with "CA".');
+                return;
+            }
+
+            await ctx.reply('📋 Fetching full transcript...');
+            await sendFullTranscript(ctx, callSid);
+        } catch (error) {
+            console.error('Full transcript command error:', error);
+            await ctx.reply('❌ Error fetching full transcript');
+        }
+    });
 };
