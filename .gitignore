@@ -6,6 +6,9 @@ Thumbs.db
 api/.env
 bot/.env
 
+# mini app folder
+**/mini-app
+
 # Node dependencies
 **/node_modules
 
