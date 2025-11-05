@@ -1,5 +1,6 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const { cleanTranscript } = require('../utils/transcript');
 
 class EnhancedDatabase {
     constructor() {
@@ -182,6 +183,8 @@ class EnhancedDatabase {
                 call_sid TEXT NOT NULL,
                 speaker TEXT NOT NULL CHECK(speaker IN ('user', 'ai')),
                 message TEXT NOT NULL,
+                raw_message TEXT,
+                clean_message TEXT,
                 interaction_count INTEGER,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                 personality_used TEXT,
@@ -190,14 +193,17 @@ class EnhancedDatabase {
                 FOREIGN KEY(call_sid) REFERENCES calls(call_sid)
             )`,
 
-            // Captured DTMF keypad input per call
-            `CREATE TABLE IF NOT EXISTS call_dtmf_inputs (
+            // Captured DTMF keypad input per call with compliance metadata
+            `CREATE TABLE IF NOT EXISTS dtmf_entries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 call_sid TEXT NOT NULL,
-                digits TEXT NOT NULL,
-                received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                source TEXT,
+                stage_key TEXT DEFAULT 'generic',
+                masked_digits TEXT NOT NULL,
+                encrypted_digits TEXT,
+                compliance_mode TEXT DEFAULT 'safe',
+                provider TEXT,
                 metadata TEXT,
+                received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(call_sid) REFERENCES calls(call_sid)
             )`,
 
@@ -207,6 +213,8 @@ class EnhancedDatabase {
                 call_sid TEXT NOT NULL,
                 speaker TEXT NOT NULL CHECK(speaker IN ('user', 'ai')),
                 message TEXT NOT NULL,
+                raw_message TEXT,
+                clean_message TEXT,
                 interaction_count INTEGER,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                 personality_used TEXT,
@@ -314,7 +322,11 @@ class EnhancedDatabase {
         const columnMigrations = [
             { sql: "ALTER TABLE calls ADD COLUMN provider TEXT DEFAULT 'twilio'", column: 'provider' },
             { sql: 'ALTER TABLE calls ADD COLUMN provider_contact_id TEXT', column: 'provider_contact_id' },
-            { sql: 'ALTER TABLE calls ADD COLUMN provider_metadata TEXT', column: 'provider_metadata' }
+            { sql: 'ALTER TABLE calls ADD COLUMN provider_metadata TEXT', column: 'provider_metadata' },
+            { sql: 'ALTER TABLE call_transcripts ADD COLUMN raw_message TEXT', column: 'call_transcripts.raw_message' },
+            { sql: 'ALTER TABLE call_transcripts ADD COLUMN clean_message TEXT', column: 'call_transcripts.clean_message' },
+            { sql: 'ALTER TABLE transcripts ADD COLUMN raw_message TEXT', column: 'transcripts.raw_message' },
+            { sql: 'ALTER TABLE transcripts ADD COLUMN clean_message TEXT', column: 'transcripts.clean_message' }
         ];
 
         for (const migration of columnMigrations) {
@@ -353,8 +365,9 @@ class EnhancedDatabase {
             'CREATE INDEX IF NOT EXISTS idx_legacy_transcripts_speaker ON transcripts(speaker)',
 
             // DTMF indexes
-            'CREATE INDEX IF NOT EXISTS idx_dtmf_call_sid ON call_dtmf_inputs(call_sid)',
-            'CREATE INDEX IF NOT EXISTS idx_dtmf_received_at ON call_dtmf_inputs(received_at)',
+            'CREATE INDEX IF NOT EXISTS idx_dtmf_call_sid ON dtmf_entries(call_sid)',
+            'CREATE INDEX IF NOT EXISTS idx_dtmf_stage_key ON dtmf_entries(stage_key)',
+            'CREATE INDEX IF NOT EXISTS idx_dtmf_received_at ON dtmf_entries(received_at)',
             
             // State indexes
             'CREATE INDEX IF NOT EXISTS idx_states_call_sid ON call_states(call_sid)',
@@ -962,32 +975,44 @@ class EnhancedDatabase {
 
     // Enhanced transcript with personality tracking (supports both table names)
     async addTranscript(transcriptData) {
-        const { 
-            call_sid, 
-            speaker, 
-            message, 
+        const {
+            call_sid,
+            speaker,
+            message,
             interaction_count,
             personality_used = null,
             adaptation_data = null,
             confidence_score = null
         } = transcriptData;
-        
+
+        const rawMessage = message == null ? '' : String(message);
+        const cleanMessage = cleanTranscript(rawMessage);
+        const storedMessage = cleanMessage || rawMessage;
+
         return new Promise((resolve, reject) => {
-            // Insert into both tables for backward compatibility
             const insertIntoTable = (tableName) => {
                 return new Promise((resolve, reject) => {
                     const stmt = this.db.prepare(`
                         INSERT INTO ${tableName} (
-                            call_sid, speaker, message, interaction_count, 
-                            personality_used, adaptation_data, confidence_score
+                            call_sid,
+                            speaker,
+                            message,
+                            raw_message,
+                            clean_message,
+                            interaction_count,
+                            personality_used,
+                            adaptation_data,
+                            confidence_score
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     `);
-                    
+
                     stmt.run([
-                        call_sid, 
-                        speaker, 
-                        message, 
+                        call_sid,
+                        speaker,
+                        storedMessage,
+                        rawMessage,
+                        cleanMessage,
                         interaction_count,
                         personality_used,
                         adaptation_data,
@@ -1003,32 +1028,35 @@ class EnhancedDatabase {
                 });
             };
 
-            // Insert into both tables
             Promise.all([
                 insertIntoTable('call_transcripts'),
                 insertIntoTable('transcripts')
-            ]).then((results) => {
-                resolve(results[0]); // Return the first table's lastID
-            }).catch(reject);
+            ])
+                .then((results) => resolve(results[0]))
+                .catch(reject);
         });
     }
 
-    async addCallDtmfInput({ call_sid, digits, source = null, metadata = null }) {
-        let metadataValue = metadata;
-        if (metadataValue && typeof metadataValue === 'object') {
-            try {
-                metadataValue = JSON.stringify(metadataValue);
-            } catch (error) {
-                metadataValue = null;
-            }
-        }
+    async saveDtmfEntry(entry) {
+        const {
+            call_sid,
+            stage_key = 'generic',
+            masked_digits,
+            encrypted_digits = null,
+            compliance_mode = 'safe',
+            provider = null,
+            metadata = null
+        } = entry;
+
+        const metadataValue = metadata && typeof metadata === 'object' ? JSON.stringify(metadata) : metadata;
+
         return new Promise((resolve, reject) => {
             const stmt = this.db.prepare(`
-                INSERT INTO call_dtmf_inputs (call_sid, digits, source, metadata)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO dtmf_entries (call_sid, stage_key, masked_digits, encrypted_digits, compliance_mode, provider, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             `);
 
-            stmt.run([call_sid, digits, source, metadataValue], function(err) {
+            stmt.run([call_sid, stage_key, masked_digits, encrypted_digits, compliance_mode, provider, metadataValue], function(err) {
                 if (err) {
                     reject(err);
                 } else {
@@ -1039,10 +1067,10 @@ class EnhancedDatabase {
         });
     }
 
-    async getCallDtmfInputs(call_sid) {
+    async getCallDtmfEntries(call_sid) {
         return new Promise((resolve, reject) => {
             const sql = `
-                SELECT * FROM call_dtmf_inputs
+                SELECT * FROM dtmf_entries
                 WHERE call_sid = ?
                 ORDER BY received_at ASC, id ASC
             `;
@@ -1057,10 +1085,10 @@ class EnhancedDatabase {
         });
     }
 
-    async getLatestCallDtmfInput(call_sid) {
+    async getLatestDtmfEntry(call_sid) {
         return new Promise((resolve, reject) => {
             const sql = `
-                SELECT * FROM call_dtmf_inputs
+                SELECT * FROM dtmf_entries
                 WHERE call_sid = ?
                 ORDER BY received_at DESC, id DESC
                 LIMIT 1
@@ -1086,7 +1114,7 @@ class EnhancedDatabase {
                     COUNT(DISTINCT d.id) as dtmf_input_count
                 FROM calls c
                 LEFT JOIN transcripts t ON c.call_sid = t.call_sid
-                LEFT JOIN call_dtmf_inputs d ON c.call_sid = d.call_sid
+                LEFT JOIN dtmf_entries d ON c.call_sid = d.call_sid
                 GROUP BY c.call_sid
                 ORDER BY c.created_at DESC
                 LIMIT ? OFFSET ?
@@ -1425,18 +1453,26 @@ class EnhancedDatabase {
     // Get enhanced call transcripts (supports both table names)
     async getCallTranscripts(call_sid) {
         return new Promise((resolve, reject) => {
-            // Try the legacy table first for backward compatibility
             const sql = `
-                SELECT * FROM transcripts 
-                WHERE call_sid = ? 
+                SELECT * FROM transcripts
+                WHERE call_sid = ?
                 ORDER BY interaction_count ASC, timestamp ASC
             `;
-            
+
             this.db.all(sql, [call_sid], (err, rows) => {
                 if (err) {
                     reject(err);
                 } else {
-                    resolve(rows || []);
+                    const result = (rows || []).map((row) => {
+                        const cleanMessage = row.clean_message || cleanTranscript(row.message || row.raw_message || '');
+                        return {
+                            ...row,
+                            raw_message: row.raw_message || row.message || '',
+                            clean_message: cleanMessage,
+                            message: cleanMessage,
+                        };
+                    });
+                    resolve(result);
                 }
             });
         });
@@ -2052,7 +2088,7 @@ class EnhancedDatabase {
                UNION ALL
                SELECT 'webhook_notifications', COUNT(*) FROM webhook_notifications
                UNION ALL
-               SELECT 'call_dtmf_inputs', COUNT(*) FROM call_dtmf_inputs
+               SELECT 'dtmf_entries', COUNT(*) FROM dtmf_entries
                UNION ALL
                SELECT 'notification_metrics', COUNT(*) FROM notification_metrics
                UNION ALL

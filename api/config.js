@@ -40,6 +40,13 @@ const corsOrigins = corsOriginsRaw
 const callProvider = ensure('CALL_PROVIDER', 'twilio').toLowerCase();
 const awsRegion = ensure('AWS_REGION', 'us-east-1');
 const adminApiToken = readEnv('ADMIN_API_TOKEN');
+const complianceModeRaw = (readEnv('CONFIG_COMPLIANCE_MODE') || 'safe').toLowerCase();
+const allowedComplianceModes = new Set(['safe', 'dev_insecure']);
+const complianceMode = allowedComplianceModes.has(complianceModeRaw) ? complianceModeRaw : 'safe';
+if (!allowedComplianceModes.has(complianceModeRaw) && !isProduction) {
+  console.warn(`Invalid CONFIG_COMPLIANCE_MODE "${complianceModeRaw}". Falling back to "safe".`);
+}
+const dtmfEncryptionKey = readEnv('DTMF_ENCRYPTION_KEY');
 
 function loadPrivateKey(rawValue) {
   if (!rawValue) {
@@ -139,5 +146,10 @@ module.exports = {
   },
   admin: {
     apiToken: adminApiToken,
+  },
+  compliance: {
+    mode: complianceMode,
+    encryptionKey: dtmfEncryptionKey,
+    isSafe: complianceMode !== 'dev_insecure',
   },
 };

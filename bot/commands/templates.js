@@ -73,6 +73,13 @@ async function templatesApiRequest(options) {
 function formatTemplatesApiError(error, action) {
   const baseHelp = `Ensure the templates service is reachable at ${config.templatesApiUrl} or update TEMPLATES_API_URL.`;
 
+  const apiCode = error.response?.data?.code || error.code;
+  if (apiCode === 'TEMPLATE_NAME_DUPLICATE') {
+    const suggested = error.response?.data?.suggested_name;
+    const suggestionLine = suggested ? ` Suggested name: ${suggested}` : '';
+    return `⚠️ ${action}: Template name already exists.${suggestionLine}`;
+  }
+
   if (error.isTemplatesApiError && error.reason === 'non_json_response') {
     return `❌ ${action}: Templates API returned unexpected content (type: ${error.contentType}). ${baseHelp}${
       error.snippet ? `\nSnippet: ${error.snippet}` : ''

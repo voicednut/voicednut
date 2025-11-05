@@ -8,7 +8,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
 
-const { platform, server: serverConfig, twilio: twilioConfig, aws: awsConfig, vonage: vonageConfig, admin: adminConfig } = require('./config');
+const { platform, server: serverConfig, twilio: twilioConfig, aws: awsConfig, vonage: vonageConfig, admin: adminConfig, compliance: complianceConfig } = require('./config');
 const { EnhancedGptService, DEFAULT_SYSTEM_PROMPT, DEFAULT_FIRST_MESSAGE } = require('./routes/gpt');
 const { getBusinessProfile } = require('./config/business');
 const { StreamService } = require('./routes/stream');
@@ -23,6 +23,7 @@ const PersonaComposer = require('./services/PersonaComposer');
 const DEFAULT_PERSONAS = require('./functions/personas');
 const { AwsConnectAdapter, AwsTtsAdapter, AwsSmsAdapter, VonageVoiceAdapter, VonageSmsAdapter } = require('./adapters');
 const { v4: uuidv4 } = require('uuid');
+const dtmfUtils = require('./utils/dtmf');
 
 const VoiceResponse = require('twilio').twiml.VoiceResponse;
 
@@ -89,6 +90,59 @@ const callDtmfBuffers = new Map();
 const DTMF_FLUSH_DELAY_MS = 1500;
 let awsAdapters = null;
 let vonageAdapters = null;
+
+function parseDtmfMetadata(metadata) {
+  if (!metadata) {
+    return {};
+  }
+  if (typeof metadata === 'object' && !Array.isArray(metadata)) {
+    return metadata;
+  }
+  try {
+    return JSON.parse(metadata);
+  } catch (error) {
+    console.warn('Failed to parse DTMF metadata payload:', error.message);
+    return { raw: metadata };
+  }
+}
+
+function formatDtmfEntriesForResponse(entries = []) {
+  const revealRaw = dtmfUtils.shouldRevealRawDigits();
+
+  return entries.map((entry) => {
+    const stageKey = dtmfUtils.normalizeStage(entry.stage_key || 'generic');
+    const metadata = parseDtmfMetadata(entry.metadata);
+    const decrypted = entry.encrypted_digits ? dtmfUtils.decryptDigits(entry.encrypted_digits) : null;
+    const rawDigits = revealRaw ? decrypted : null;
+    const displayDigits = rawDigits || entry.masked_digits;
+    const stageDefinition = dtmfUtils.getStageDefinition(stageKey);
+
+    const formatted = {
+      id: entry.id,
+      call_sid: entry.call_sid,
+      stage_key: stageKey,
+      label: stageDefinition.label,
+      digits: displayDigits,
+      masked_digits: entry.masked_digits,
+      received_at: entry.received_at,
+      compliance_mode: entry.compliance_mode,
+      provider: entry.provider,
+      metadata
+    };
+
+    if (rawDigits) {
+      formatted.raw_digits = rawDigits;
+    }
+
+    if (typeof metadata?.length === 'number') {
+      formatted.length = metadata.length;
+    } else if (entry.masked_digits) {
+      formatted.length = String(entry.masked_digits).replace(/[^*•0-9]/g, '').length;
+    }
+
+    return formatted;
+  });
+}
 
 async function ensureAwsAdapters() {
   if (awsAdapters) {
@@ -507,25 +561,71 @@ app.ws('/connection', (ws) => {
       }
 
       try {
-        const metadataPayload = {
-          ...extraMeta,
+        const dtmfDetails = extraMeta?.dtmf || {};
+        const stageCandidate =
+          extraMeta.stage_key ||
+          extraMeta.stage ||
+          dtmfDetails.stage_key ||
+          dtmfDetails.stage ||
+          dtmfDetails.prompt_key ||
+          null;
+        const stageKey = dtmfUtils.normalizeStage(stageCandidate || 'generic');
+        const stageDefinition = dtmfUtils.getStageDefinition(stageKey);
+
+        const metadataEnvelope = {
           source,
           provider: currentProvider,
-          digit_count: sanitizedDigits.length,
-          captured_at: new Date().toISOString()
+          finished: typeof extraMeta.finished === 'boolean' ? extraMeta.finished : undefined,
+          reason: extraMeta.reason,
+          captured_at: extraMeta.captured_at || new Date().toISOString(),
+          stage_label: stageDefinition.label,
         };
 
-        await db.addCallDtmfInput({
+        if (dtmfDetails?.timestamp) {
+          metadataEnvelope.provider_timestamp = dtmfDetails.timestamp;
+        }
+        if (typeof dtmfDetails?.confidence === 'number') {
+          metadataEnvelope.confidence = dtmfDetails.confidence;
+        }
+        if (dtmfDetails?.type) {
+          metadataEnvelope.provider_type = dtmfDetails.type;
+        }
+        if (extraMeta?.metadata && typeof extraMeta.metadata === 'object') {
+          metadataEnvelope.provider_metadata = extraMeta.metadata;
+        }
+
+        Object.keys(metadataEnvelope).forEach((key) => {
+          if (metadataEnvelope[key] === undefined || metadataEnvelope[key] === null) {
+            delete metadataEnvelope[key];
+          }
+        });
+
+        const compliancePayload = dtmfUtils.savePayloadForCompliance(
+          stageKey,
+          sanitizedDigits,
+          currentProvider,
+          metadataEnvelope
+        );
+        const complianceMode = complianceConfig?.mode || 'safe';
+
+        await db.saveDtmfEntry({
           call_sid: callSid,
-          digits: sanitizedDigits,
-          source,
-          metadata: JSON.stringify(metadataPayload)
+          stage_key: compliancePayload.metadata.stage_key,
+          masked_digits: compliancePayload.maskedDigits,
+          encrypted_digits: compliancePayload.encryptedDigits,
+          compliance_mode: complianceMode,
+          provider: currentProvider,
+          metadata: compliancePayload.metadata
         });
 
         await db.updateCallState(callSid, 'dtmf_captured', {
-          digits: sanitizedDigits,
-          source,
-          metadata: metadataPayload
+          stage_key: compliancePayload.metadata.stage_key,
+          masked_digits: compliancePayload.maskedDigits,
+          digits_preview: dtmfUtils.shouldRevealRawDigits()
+            ? sanitizedDigits
+            : compliancePayload.maskedDigits,
+          provider: currentProvider,
+          metadata: compliancePayload.metadata
         });
 
         const callRecord = await db.getCall(callSid);
@@ -541,10 +641,14 @@ app.ws('/connection', (ws) => {
         await db.logServiceHealth('call_system', 'dtmf_captured', {
           call_sid: callSid,
           digits_length: sanitizedDigits.length,
+          stage_key: compliancePayload.metadata.stage_key,
           source
         });
 
-        console.log(`🔢 Captured DTMF input for ${callSid}: ${sanitizedDigits}`.cyan);
+        const logDigits = dtmfUtils.shouldRevealRawDigits()
+          ? sanitizedDigits
+          : compliancePayload.maskedDigits;
+        console.log(`🔢 Captured DTMF input for ${callSid}: ${logDigits}`.cyan);
       } catch (error) {
         console.error('❌ Failed to persist DTMF input:', error);
       }
@@ -925,7 +1029,7 @@ async function handleCallEnd(callSid, callStartTime) {
 
     const callDetails = await db.getCall(callSid);
     const transcripts = await db.getCallTranscripts(callSid);
-    const dtmfInputs = await db.getCallDtmfInputs(callSid);
+    const dtmfEntries = await db.getCallDtmfEntries(callSid);
 
     if (callDetails) {
       if (callDetails.business_context) {
@@ -936,8 +1040,8 @@ async function handleCallEnd(callSid, callStartTime) {
         }
       }
 
-      callDetails.dtmf_input_count = dtmfInputs.length;
-      callDetails.latest_dtmf_digits = dtmfInputs.length ? dtmfInputs[dtmfInputs.length - 1].digits : null;
+      callDetails.dtmf_input_count = dtmfEntries.length;
+      callDetails.latest_dtmf_digits = dtmfEntries.length ? dtmfEntries[dtmfEntries.length - 1].masked_digits : null;
     }
 
     const summary = generateCallSummary(transcripts, duration);
@@ -973,7 +1077,11 @@ async function handleCallEnd(callSid, callStartTime) {
     // Create enhanced webhook notification for completion
     if (callDetails && callDetails.user_chat_id) {
       await db.createEnhancedWebhookNotification(callSid, 'call_completed', callDetails.user_chat_id);
-      
+
+      if (dtmfEntries.length > 0) {
+        await db.createEnhancedWebhookNotification(callSid, 'call_dtmf_summary', callDetails.user_chat_id, 'high');
+      }
+
       // Schedule transcript notification with delay
       setTimeout(async () => {
         try {
@@ -1772,7 +1880,8 @@ app.get('/api/calls/:callSid', async (req, res) => {
     }
 
     const transcripts = await db.getCallTranscripts(callSid);
-    const dtmfInputs = await db.getCallDtmfInputs(callSid);
+    const dtmfEntries = await db.getCallDtmfEntries(callSid);
+    const dtmfInputs = formatDtmfEntriesForResponse(dtmfEntries);
 
     let businessContext = null;
     if (call.business_context) {
@@ -2331,7 +2440,7 @@ app.get('/api/calls/list', async (req, res) => {
         MAX(t.timestamp) as conversation_end
       FROM calls c
       LEFT JOIN transcripts t ON c.call_sid = t.call_sid
-      LEFT JOIN call_dtmf_inputs d ON c.call_sid = d.call_sid
+      LEFT JOIN dtmf_entries d ON c.call_sid = d.call_sid
       ${whereClause}
       GROUP BY c.call_sid
       ORDER BY c.created_at DESC
@@ -3285,6 +3394,36 @@ function normalizeTemplatePayload(body) {
     };
 }
 
+function isTemplateNameConstraint(error) {
+    if (!error) {
+        return false;
+    }
+    const message = error.message || '';
+    return error.code === 'SQLITE_CONSTRAINT' || /UNIQUE constraint failed: call_templates\.name/i.test(message);
+}
+
+async function suggestTemplateName(baseName = 'template') {
+    const sanitized = (baseName || 'template').trim() || 'template';
+    const suffixMatch = sanitized.match(/-(\d+)$/);
+    const prefix = suffixMatch ? sanitized.slice(0, -suffixMatch[0].length) : sanitized;
+    let counter = suffixMatch ? parseInt(suffixMatch[1], 10) + 1 : 1;
+    let attempts = 0;
+    const maxAttempts = 50;
+
+    while (attempts < maxAttempts) {
+        const candidate = `${prefix}-${counter}`;
+        // eslint-disable-next-line no-await-in-loop
+        const existing = await db.getCallTemplateByName(candidate);
+        if (!existing) {
+            return candidate;
+        }
+        counter += 1;
+        attempts += 1;
+    }
+
+    return `${prefix}-${Date.now()}`;
+}
+
 app.get('/api/call-templates', async (req, res) => {
     try {
         const templates = await db.getCallTemplates();
@@ -3315,8 +3454,9 @@ app.get('/api/call-templates/:id', async (req, res) => {
 });
 
 app.post('/api/call-templates', async (req, res) => {
+    let payload;
     try {
-        const payload = normalizeTemplatePayload(req.body);
+        payload = normalizeTemplatePayload(req.body);
 
         if (!payload.name || payload.name.trim().length === 0) {
             return res.status(400).json({ success: false, error: 'Template name is required' });
@@ -3327,12 +3467,22 @@ app.post('/api/call-templates', async (req, res) => {
 
         res.status(201).json({ success: true, template });
     } catch (error) {
+        if (isTemplateNameConstraint(error)) {
+            const suggestion = await suggestTemplateName(payload?.name || 'template');
+            return res.status(409).json({
+                success: false,
+                error: 'Template name already exists',
+                code: 'TEMPLATE_NAME_DUPLICATE',
+                suggested_name: suggestion
+            });
+        }
         console.error('❌ Failed to create call template:', error);
         res.status(500).json({ success: false, error: 'Failed to create call template', details: error.message });
     }
 });
 
 app.put('/api/call-templates/:id', async (req, res) => {
+    let payload;
     try {
         const id = Number(req.params.id);
         if (Number.isNaN(id)) {
@@ -3344,18 +3494,28 @@ app.put('/api/call-templates/:id', async (req, res) => {
             return res.status(404).json({ success: false, error: 'Template not found' });
         }
 
-        const payload = normalizeTemplatePayload(req.body);
+        payload = normalizeTemplatePayload(req.body);
         await db.updateCallTemplate(id, payload);
         const updated = await db.getCallTemplateById(id);
 
         res.json({ success: true, template: updated });
     } catch (error) {
+        if (isTemplateNameConstraint(error)) {
+            const suggestion = await suggestTemplateName(payload?.name || 'template');
+            return res.status(409).json({
+                success: false,
+                error: 'Template name already exists',
+                code: 'TEMPLATE_NAME_DUPLICATE',
+                suggested_name: suggestion
+            });
+        }
         console.error('❌ Failed to update call template:', error);
         res.status(500).json({ success: false, error: 'Failed to update call template', details: error.message });
     }
 });
 
 app.post('/api/call-templates/:id/clone', async (req, res) => {
+    let cloneName;
     try {
         const id = Number(req.params.id);
         if (Number.isNaN(id)) {
@@ -3368,6 +3528,7 @@ app.post('/api/call-templates/:id/clone', async (req, res) => {
         }
 
         const { name, description } = req.body;
+        cloneName = name;
 
         if (!name || name.trim().length === 0) {
             return res.status(400).json({ success: false, error: 'Clone name is required' });
@@ -3386,6 +3547,15 @@ app.post('/api/call-templates/:id/clone', async (req, res) => {
         const cloned = await db.getCallTemplateByName(name);
         res.status(201).json({ success: true, template: cloned });
     } catch (error) {
+        if (isTemplateNameConstraint(error)) {
+            const suggestion = await suggestTemplateName(cloneName || 'template');
+            return res.status(409).json({
+                success: false,
+                error: 'Template name already exists',
+                code: 'TEMPLATE_NAME_DUPLICATE',
+                suggested_name: suggestion
+            });
+        }
         console.error('❌ Failed to clone call template:', error);
         res.status(500).json({ success: false, error: 'Failed to clone call template', details: error.message });
     }

@@ -24,6 +24,11 @@ module.exports = (bot) => {
 • Monitor initial responses
 • End calls if needed with /end
 
+*Admin Controls:*
+• Use /provider status to view the active call provider
+• Switch providers with /provider twilio | aws | vonage
+• Manage authorized users with /users, /adduser, /removeuser
+
 *Troubleshooting:*
 • If call fails, check number format
 • Ensure proper authorization

@@ -15,7 +15,9 @@ const {
   startOperation,
   ensureOperationActive,
   registerAbortController,
-  OperationCancelledError
+  OperationCancelledError,
+  ensureFlow,
+  safeReset
 } = require('../utils/sessionState');
 
 const templatesApiBase = config.templatesApiUrl.replace(/\/+$/, '');
@@ -350,6 +352,7 @@ async function buildCustomCallConfig(conversation, ctx, ensureActive, businessOp
 
 async function callFlow(conversation, ctx) {
   const opId = startOperation(ctx, 'call');
+  const flow = ensureFlow(ctx, 'call', { step: 'start' });
   const ensureActive = () => ensureOperationActive(ctx, opId);
 
   const waitForMessage = async () => {
@@ -365,9 +368,11 @@ async function callFlow(conversation, ctx) {
       await ctx.reply('❌ You are not authorized to use this bot.');
       return;
     }
+    flow.touch('authorized');
 
     const businessOptions = await getBusinessOptions();
     ensureActive();
+    flow.touch('business-options');
 
     const prefill = ctx.session.meta?.prefill || {};
     let number = prefill.phoneNumber || null;
@@ -377,6 +382,7 @@ async function callFlow(conversation, ctx) {
       if (ctx.session.meta) {
         delete ctx.session.meta.prefill;
       }
+      flow.touch('number-prefilled');
     } else {
       await ctx.reply('📞 Enter phone number (E.164 format, e.g., +16125151442):');
       const numMsg = await waitForMessage();
@@ -391,6 +397,7 @@ async function callFlow(conversation, ctx) {
         await ctx.reply('❌ Invalid phone number format. Use E.164 format: +16125151442');
         return;
       }
+      flow.touch('number-captured');
     }
 
     const configurationMode = await askOptionWithButtons(
@@ -412,6 +419,7 @@ async function callFlow(conversation, ctx) {
         await ctx.reply('ℹ️ No template selected. Switching to custom persona builder.');
       }
     }
+    flow.touch('mode-selected');
 
     if (!configuration) {
       configuration = await buildCustomCallConfig(conversation, ctx, ensureActive, businessOptions);
@@ -421,6 +429,7 @@ async function callFlow(conversation, ctx) {
       await ctx.reply('❌ Call setup cancelled.');
       return;
     }
+    flow.touch('configuration-ready');
 
     const payload = {
       number,
@@ -475,6 +484,7 @@ async function callFlow(conversation, ctx) {
         `• AI-generated summary\n\n`;
 
       await ctx.reply(successMsg, { parse_mode: 'Markdown' });
+      flow.touch('completed');
     } else {
       await ctx.reply('⚠️ Call was sent but response format unexpected. Check logs.');
     }
@@ -496,23 +506,43 @@ async function callFlow(conversation, ctx) {
       }
     });
 
+    let handled = false;
     if (error.response) {
       const status = error.response.status;
-      if (status === 400) {
+      const apiError = (error.response.data?.error || '').toString();
+      const unknownBusinessMatch = apiError.match(/Unknown business_id "([^"]+)"/i);
+      if (unknownBusinessMatch) {
+        const invalidId = unknownBusinessMatch[1];
+        await ctx.reply(`❌ Unrecognized service “${invalidId}”. Choose a valid business profile.`);
+        handled = true;
+      } else if (status === 400) {
         await ctx.reply('❌ Invalid request. Check the provided details and try again.');
+        handled = true;
       } else if (status === 401) {
         await ctx.reply('❌ Authentication failed. Please verify your API credentials.');
+        handled = true;
       } else if (status === 503) {
         await ctx.reply('⚠️ Service unavailable. Please try again shortly.');
-      } else {
+        handled = true;
+      }
+
+      if (!handled) {
         const errorData = error.response.data;
         await ctx.reply(`❌ Call failed with status ${status}: ${errorData?.error || error.response.statusText}`);
+        handled = true;
       }
     } else if (error.request) {
-      await ctx.reply('❌ Network error. Unable to reach the server. Please check your connection.');
+      await ctx.reply('🔄 Temporary network issue. Retrying shortly.');
+      handled = true;
     } else {
       await ctx.reply(`❌ Unexpected error: ${error.message}`);
+      handled = true;
     }
+
+    await safeReset(ctx, 'call_flow_error', {
+      message: '⚠️ Setup interrupted — restarting call setup...',
+      menuHint: '📋 Use /call to try again or /menu for other actions.'
+    });
   }
 }
 
