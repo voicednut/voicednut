@@ -4,13 +4,25 @@ const crypto = require('crypto');
 const config = require('../config');
 
 const STAGE_DEFINITIONS = {
-  SSN_LAST4: { label: 'SSN', mask: (digits) => '••••' },
-  DOB_MMDD: { label: 'DOB', mask: (digits) => '••••' },
+  SSN: { label: 'SSN', mask: (digits = '') => digits.replace(/\d/g, '•') },
+  SSN_LAST4: { label: 'SSN', mask: () => '••••' },
+  DOB: { label: 'DOB', mask: (digits = '') => digits.replace(/\d/g, '•') },
+  DOB_MMDD: { label: 'DOB', mask: (digits = '') => digits.replace(/\d/g, '•') },
   CARD_PAN: {
     label: 'Card Number',
     mask: (digits = '') => digits.replace(/\d(?=\d{4})/g, '*'),
   },
+  CARD_LAST4: { label: 'Card Number', mask: () => '****' },
   CVV: { label: 'CVV', mask: () => '***' },
+  OTP: { label: 'One-Time Passcode', mask: (digits = '') => digits.replace(/\d/g, '•') },
+  PASSCODE: { label: 'Passcode', mask: (digits = '') => digits.replace(/\d/g, '•') },
+  PIN: { label: 'PIN', mask: (digits = '') => digits.replace(/\d/g, '•') },
+  ACCOUNT: { label: 'Account Number', mask: (digits = '') => digits.replace(/\d(?=\d{4})/g, '*') },
+  ACCOUNT_NUMBER: { label: 'Account Number', mask: (digits = '') => digits.replace(/\d(?=\d{4})/g, '*') },
+  ROUTING: { label: 'Routing Number', mask: (digits = '') => digits.replace(/\d(?=\d{4})/g, '*') },
+  ZIP: { label: 'ZIP Code', mask: (digits = '') => digits.replace(/\d/g, '•') },
+  PHONE: { label: 'Phone Number', mask: (digits = '') => digits.replace(/\d(?=\d{4})/g, '*') },
+  EMAIL_CODE: { label: 'Email Code', mask: (digits = '') => digits.replace(/\d/g, '•') },
 };
 
 const GENERIC_STAGE = { label: 'Entry', mask: (digits = '') => digits.replace(/\d/g, '•') };
@@ -122,7 +134,17 @@ function formatSummary(entries = []) {
   const revealRaw = shouldRevealRawDigits();
   const summaryLines = entries.map((entry) => {
     const stage = getStageDefinition(entry.stage_key);
-    const label = stage.label || entry.stage_key || 'Entry';
+    let label = stage.label || entry.stage_key || 'Entry';
+    if (entry.metadata) {
+      try {
+        const meta = typeof entry.metadata === 'string' ? JSON.parse(entry.metadata) : entry.metadata;
+        if (meta && meta.stage_label) {
+          label = meta.stage_label;
+        }
+      } catch (error) {
+        // ignore
+      }
+    }
     let value = entry.masked_digits;
     if (revealRaw) {
       const decrypted = decryptDigits(entry.encrypted_digits);
@@ -136,6 +158,28 @@ function formatSummary(entries = []) {
   return { summaryLines, containsRaw: revealRaw };
 }
 
+const SENSITIVE_STAGE_KEYS = new Set([
+  'SSN',
+  'SSN_LAST4',
+  'DOB',
+  'DOB_MMDD',
+  'CARD_PAN',
+  'CARD_LAST4',
+  'CVV',
+  'OTP',
+  'PASSCODE',
+  'PIN',
+  'ACCOUNT',
+  'ACCOUNT_NUMBER',
+  'ROUTING',
+  'EMAIL_CODE',
+]);
+
+function isSensitiveStage(stageKey = '') {
+  const normalized = normalizeStage(stageKey);
+  return SENSITIVE_STAGE_KEYS.has(normalized);
+}
+
 module.exports = {
   normalizeStage,
   maskDigits,
@@ -145,5 +189,6 @@ module.exports = {
   shouldRevealRawDigits,
   formatSummary,
   getStageDefinition,
+  isSensitiveStage,
+  SENSITIVE_STAGE_KEYS,
 };
-
