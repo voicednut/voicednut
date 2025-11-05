@@ -137,12 +137,15 @@ function registerProviderCommand(bot) {
     });
 }
 
-module.exports = {
-    registerProviderCommand,
-    fetchProviderStatus,
-    updateProvider,
-    formatProviderStatus,
-    handleProviderSwitch,
-    SUPPORTED_PROVIDERS,
-    ADMIN_HEADER_NAME,
-};
+function initializeProviderCommand(bot) {
+    registerProviderCommand(bot);
+}
+
+module.exports = initializeProviderCommand;
+module.exports.registerProviderCommand = registerProviderCommand;
+module.exports.fetchProviderStatus = fetchProviderStatus;
+module.exports.updateProvider = updateProvider;
+module.exports.formatProviderStatus = formatProviderStatus;
+module.exports.handleProviderSwitch = handleProviderSwitch;
+module.exports.SUPPORTED_PROVIDERS = SUPPORTED_PROVIDERS;
+module.exports.ADMIN_HEADER_NAME = ADMIN_HEADER_NAME;

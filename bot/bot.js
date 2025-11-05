@@ -442,7 +442,10 @@ bot.command('start', async (ctx) => {
                 .text('⬆️ Promote', 'PROMOTE')
                 .row()
                 .text('👥 Users', 'USERS')
-                .text('❌ Remove', 'REMOVE');
+                .text('❌ Remove', 'REMOVE')
+                .row()
+                .text('☎️ Provider', 'PROVIDER_STATUS')
+                .text('🔍 Status', 'STATUS');
         }
 
         // Prepare the message with conditional Mini App notice
@@ -1161,8 +1164,7 @@ bot.command('miniapp', async (ctx) => {
     }
 });
 
-// Register bot commands
-bot.api.setMyCommands([
+const TELEGRAM_COMMANDS = [
     { command: 'start', description: 'Start or restart the bot' },
     { command: 'miniapp', description: 'Open the Voice Call Mini App' },
     { command: 'call', description: 'Start outbound voice call' },
@@ -1185,7 +1187,7 @@ bot.api.setMyCommands([
     { command: 'removeuser', description: 'Remove a USER (admin only)' },
     { command: 'users', description: 'List authorized users (admin only)' },
     { command: 'status', description: 'System status (admin only)' }
-]);
+];
 
 // Handle unknown commands and text messages
 bot.on('message:text', async (ctx) => {
@@ -1212,6 +1214,8 @@ async function bootstrap() {
 
     console.log('🚀 Starting Voice Call Bot...');
     try {
+        await bot.api.setMyCommands(TELEGRAM_COMMANDS);
+        console.log('✅ Telegram commands registered');
         await bot.start();
         console.log('✅ Voice Call Bot is running!');
         console.log('🔄 Polling for updates...');
