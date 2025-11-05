@@ -8,7 +8,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
 
-const { platform, server: serverConfig, twilio: twilioConfig, aws: awsConfig, vonage: vonageConfig, admin: adminConfig, compliance: complianceConfig } = require('./config');
+const { platform, server: serverConfig, twilio: twilioConfig, aws: awsConfig, vonage: vonageConfig, admin: adminConfig, compliance: complianceConfig, deepgram: deepgramConfig } = require('./config');
 const { EnhancedGptService, DEFAULT_SYSTEM_PROMPT, DEFAULT_FIRST_MESSAGE } = require('./routes/gpt');
 const { getBusinessProfile } = require('./config/business');
 const { StreamService } = require('./routes/stream');
@@ -1180,7 +1180,8 @@ app.post('/outbound-call', async (req, res) => {
       emotion,
       urgency,
       technical_level: technicalLevel,
-      voice_model
+      voice_model,
+      template
     } = req.body;
 
     if (!number) {
@@ -1230,7 +1231,9 @@ app.post('/outbound-call', async (req, res) => {
     }
 
     let businessProfile = null;
-    if (business_id) {
+    const templateName = template || null;
+
+    if (business_id && !['general', 'custom'].includes(String(business_id).toLowerCase())) {
       businessProfile = getBusinessProfile(business_id);
       if (!businessProfile) {
         return res.status(400).json({
@@ -1238,6 +1241,8 @@ app.post('/outbound-call', async (req, res) => {
         });
       }
     }
+
+    const resolvedBusinessId = businessProfile ? businessProfile.id : (business_id || 'general');
 
     const normalizeKey = (value, fallback) =>
       (value || fallback || '')
@@ -1316,6 +1321,8 @@ app.post('/outbound-call', async (req, res) => {
           ? 'default'
           : 'custom';
 
+    const effectiveVoiceModel = voice_model || deepgramConfig.voiceModel;
+
     const callConfig = {
       prompt: selectedPrompt,
       first_message: selectedFirstMessage,
@@ -1324,12 +1331,13 @@ app.post('/outbound-call', async (req, res) => {
       created_at: new Date().toISOString(),
       user_chat_id: user_chat_id,
       business_context: functionSystem.context,
-      business_id: businessProfile ? businessProfile.id : null,
+      business_id: resolvedBusinessId,
       business_display_name: businessProfile ? businessProfile.displayName : null,
       function_count: functionSystem.functions.length,
       prompt_source: promptSource,
       persona_metadata: composition ? composition.metadata : null,
-      voice_model: voice_model || null
+      voice_model: effectiveVoiceModel,
+      template_name: templateName
     };
 
     let callSid = null;
@@ -1346,7 +1354,8 @@ app.post('/outbound-call', async (req, res) => {
         PROMPT_SOURCE: promptSource,
         BUSINESS_CONTEXT: JSON.stringify(functionSystem.context || {}),
         FIRST_MESSAGE: selectedFirstMessage,
-        VOICE_MODEL: voice_model || ''
+        VOICE_MODEL: effectiveVoiceModel || '',
+        TEMPLATE_NAME: templateName || ''
       };
 
       providerResponse = await awsAdapters.connect.startOutboundCall({
@@ -1425,7 +1434,7 @@ app.post('/outbound-call', async (req, res) => {
       const businessContextRecord = {
         ...functionSystem.context,
         persona: composition ? composition.metadata : null,
-        voice_model: voice_model || null
+        voice_model: effectiveVoiceModel || null
       };
 
       await db.createCall({
@@ -1441,7 +1450,8 @@ app.post('/outbound-call', async (req, res) => {
         provider_metadata: {
           ...providerMetadata,
           promptSource,
-          voice_model: voice_model || null
+          voice_model: effectiveVoiceModel || null,
+          template_name: templateName || null
         }
       });
 
@@ -1467,7 +1477,7 @@ app.post('/outbound-call', async (req, res) => {
         callConfig,
         functionSystem,
         firstMessage: selectedFirstMessage,
-        voiceModel: voice_model || null,
+        voiceModel: effectiveVoiceModel || null,
         phoneNumber: number
       });
     }
@@ -1480,14 +1490,15 @@ app.post('/outbound-call', async (req, res) => {
       provider: currentProvider,
       provider_contact_id: providerContactId,
       business_context: functionSystem.context,
-      business_id: businessProfile ? businessProfile.id : null,
+      business_id: resolvedBusinessId,
       business_display_name: businessProfile ? businessProfile.displayName : null,
       prompt_source: promptSource,
       generated_functions: functionSystem.functions.length,
       function_types: functionSystem.functions.map((f) => f.function.name),
       enhanced_webhooks: true,
       persona: composition ? composition.metadata : null,
-      voice_model: voice_model || null
+      voice_model: effectiveVoiceModel || null,
+      template: templateName
     });
   } catch (error) {
     console.error('Error creating enhanced adaptive outbound call:', error);

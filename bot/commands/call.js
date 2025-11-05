@@ -171,10 +171,12 @@ async function selectCallTemplate(conversation, ctx, ensureActive) {
 
   const payloadUpdates = {
     channel: 'voice',
-    business_id: template.business_id || undefined,
+    business_id: template.business_id || config.defaultBusinessId,
     prompt: filledPrompt,
     first_message: filledFirstMessage,
-    voice_model: template.voice_model || undefined
+    voice_model: template.voice_model || config.defaultVoiceModel,
+    template: template.name,
+    template_id: template.id
   };
 
   const summary = [`Template: ${template.name}`];
@@ -182,9 +184,15 @@ async function selectCallTemplate(conversation, ctx, ensureActive) {
     summary.push(`Description: ${template.description}`);
   }
 
-  if (template.business_id) {
-    const business = findBusinessOption(template.business_id);
-    summary.push(`Persona: ${business ? business.label : template.business_id}`);
+  const businessOption = template.business_id ? findBusinessOption(template.business_id) : null;
+  if (businessOption) {
+    summary.push(`Persona: ${businessOption.label}`);
+  } else if (template.business_id) {
+    summary.push(`Persona: ${template.business_id}`);
+  }
+
+  if (!payloadUpdates.purpose && businessOption?.defaultPurpose) {
+    payloadUpdates.purpose = businessOption.defaultPurpose;
   }
 
   const personaConfig = template.persona_config || {};
@@ -207,6 +215,10 @@ async function selectCallTemplate(conversation, ctx, ensureActive) {
 
   if (Object.keys(placeholderValues).length > 0) {
     summary.push(`Variables: ${Object.entries(placeholderValues).map(([k, v]) => `${k}=${v}`).join(', ')}`);
+  }
+
+  if (!payloadUpdates.purpose) {
+    payloadUpdates.purpose = config.defaultPurpose;
   }
 
   return {
@@ -235,8 +247,13 @@ async function buildCustomCallConfig(conversation, ctx, ensureActive, businessOp
     return null;
   }
 
+  const resolvedBusinessId = selectedBusiness.id || config.defaultBusinessId;
   const payloadUpdates = {
-    channel: 'voice'
+    channel: 'voice',
+    business_id: resolvedBusinessId,
+    voice_model: config.defaultVoiceModel,
+    template: selectedBusiness.custom ? 'custom' : resolvedBusinessId,
+    purpose: selectedBusiness.defaultPurpose || config.defaultPurpose
   };
   const summary = [];
 
@@ -270,9 +287,8 @@ async function buildCustomCallConfig(conversation, ctx, ensureActive, businessOp
     summary.push('Persona: Custom prompt');
     summary.push(`Prompt: ${prompt.substring(0, 120)}${prompt.length > 120 ? '...' : ''}`);
     summary.push(`First message: ${firstMessage.substring(0, 120)}${firstMessage.length > 120 ? '...' : ''}`);
+    payloadUpdates.purpose = 'custom';
   } else {
-    payloadUpdates.business_id = selectedBusiness.id;
-
     const availablePurposes = selectedBusiness.purposes || [];
     let selectedPurpose = availablePurposes.find((p) => p.id === selectedBusiness.defaultPurpose) || availablePurposes[0];
 
@@ -450,6 +466,11 @@ async function callFlow(conversation, ctx) {
       user_chat_id: ctx.from.id.toString(),
       ...configuration.payloadUpdates
     };
+
+    payload.business_id = payload.business_id || config.defaultBusinessId;
+    payload.purpose = payload.purpose || config.defaultPurpose;
+    payload.voice_model = payload.voice_model || config.defaultVoiceModel;
+    payload.template = payload.template || 'custom';
 
     const summaryLines = [
       '📋 *Call Details:*',

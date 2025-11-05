@@ -5,6 +5,7 @@ const {
   decryptDigits,
   getStageDefinition,
   normalizeStage,
+  isSensitiveStage,
 } = require('../utils/dtmf');
 
 function parseDtmfMetadata(metadata) {
@@ -30,11 +31,12 @@ function formatDtmfEntries(entries = []) {
     const stageDefinition = getStageDefinition(stageKey);
     const decrypted = entry.encrypted_digits ? decryptDigits(entry.encrypted_digits) : null;
     const rawDigits = revealRaw ? decrypted : null;
+    const label = metadata.stage_label || stageDefinition.label || stageKey || 'Entry';
     return {
       id: entry.id,
       call_sid: entry.call_sid,
       stage_key: stageKey,
-      label: stageDefinition.label,
+      label,
       digits: rawDigits || entry.masked_digits,
       raw_digits: rawDigits || null,
       masked_digits: entry.masked_digits,
@@ -44,6 +46,30 @@ function formatDtmfEntries(entries = []) {
       metadata,
     };
   });
+}
+
+function sanitizeTelegramText(message = '') {
+  const raw = message == null ? '' : String(message);
+  return raw
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/<br\s*\/?/gi, '\n')
+    .replace(/\u2028|\u2029/g, '\n')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+    .replace(/&(?!amp;|lt;|gt;|quot;)/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function buildTelegramMessage(lines = []) {
+  return lines.filter(Boolean).join('\n');
+}
+
+function isSensitiveDtmf(entries = []) {
+  return entries.some((entry) => isSensitiveStage(entry.stage_key));
 }
 
 class EnhancedWebhookService {
@@ -180,6 +206,7 @@ class EnhancedWebhookService {
       const normalizedStatus = status.toLowerCase();
       let message = '';
       let emoji = '';
+      let allowTranscript = additionalData.sensitive_dtmf ? false : true;
       
       // Track call timing for duration calculations
       if (!this.callTimestamps.has(call_sid)) {
@@ -260,7 +287,7 @@ class EnhancedWebhookService {
         case 'no-answer':
         case 'no_answer':
           emoji = '❌';
-          message = 'No answer';
+          message = 'No answer. The call attempt was completed with no response.';
           
           // Enhanced no-answer timing calculation
           let ringTime = 0;
@@ -283,6 +310,7 @@ class EnhancedWebhookService {
             message += ` (rang ${ringTime}s)`;
           }
           
+          allowTranscript = false;
           console.log(`📞 No-answer notification: ${message}`.yellow);
           break;
           
@@ -308,14 +336,14 @@ class EnhancedWebhookService {
       const fullMessage = `${emoji} ${message}`;
       
       const isTerminal = ['completed', 'failed', 'no-answer', 'busy', 'canceled'].includes(normalizedStatus);
-      const followUpKeyboard = isTerminal ? this.buildCallFollowUpKeyboard(call_sid, normalizedStatus) : null;
+      const followUpKeyboard = isTerminal ? this.buildCallFollowUpKeyboard(call_sid, normalizedStatus, { allowTranscript }) : null;
 
       let messageText = fullMessage;
       if (followUpKeyboard) {
         messageText += '\n\n⚡ Quick actions:';
       }
 
-      await this.sendTelegramMessage(telegram_chat_id, messageText, false, followUpKeyboard);
+      await this.sendTelegramMessage(telegram_chat_id, messageText, 'HTML', followUpKeyboard);
       console.log(`✅ Sent enhanced status update: ${normalizedStatus} for call ${call_sid}`.green);
       
       // Log notification metric
@@ -353,43 +381,45 @@ class EnhancedWebhookService {
       const dtmfSummary = dtmfEntries.length ? formatSummary(dtmfEntries) : { summaryLines: [], containsRaw: false };
       
       if (!callDetails || !transcripts || transcripts.length === 0) {
-        await this.sendTelegramMessage(telegram_chat_id, '📋 No transcript available for this call');
+        await this.sendTelegramMessage(telegram_chat_id, buildTelegramMessage([
+          '📋 No transcript available for this call'
+        ]));
         return true;
       }
 
-      const sections = [];
-      sections.push('<b>Call Transcript</b>');
-      sections.push('');
-      sections.push(`<b>Phone:</b> ${this.escapeHtml(callDetails.phone_number || 'Unknown')}`);
+      const lines = [];
+      lines.push('📋 Call Transcript');
+      lines.push('');
+      lines.push(`Phone: ${callDetails.phone_number || 'Unknown'}`);
 
       if (callDetails.duration && callDetails.duration > 0) {
         const minutes = Math.floor(callDetails.duration / 60);
         const seconds = callDetails.duration % 60;
-        sections.push(`<b>Duration:</b> ${minutes}:${String(seconds).padStart(2, '0')}`);
+        lines.push(`Duration: ${minutes}:${String(seconds).padStart(2, '0')}`);
       }
 
       if (callDetails.started_at) {
         const startTime = new Date(callDetails.started_at).toLocaleTimeString();
-        sections.push(`<b>Time:</b> ${this.escapeHtml(startTime)}`);
+        lines.push(`Time: ${startTime}`);
       }
 
-      sections.push(`<b>Messages:</b> ${transcripts.length}`);
+      lines.push(`Messages: ${transcripts.length}`);
 
       if (callDetails.status) {
         const statusEmoji = this.getStatusEmoji(callDetails.status);
-        sections.push(`<b>Status:</b> ${statusEmoji} ${this.escapeHtml(callDetails.status)}`);
+        lines.push(`Status: ${statusEmoji} ${callDetails.status}`);
       }
 
       if (formattedDtmf.length > 0) {
-        const keypadLines = dtmfSummary.summaryLines.map((line) => `&#8226; ${this.escapeHtml(line)}`);
         const latestEntry = formattedDtmf[formattedDtmf.length - 1];
         const timestamp = latestEntry?.received_at ? new Date(latestEntry.received_at).toLocaleTimeString() : null;
         const metadata = latestEntry?.metadata || {};
         const providerLabel = (metadata.source || latestEntry?.provider || 'unknown').toString().toUpperCase();
 
-        sections.push('');
-        sections.push('<b>Keypad Entries:</b>');
-        sections.push(keypadLines.join('<br>'));
+        lines.push('');
+        lines.push('Keypad Entries:');
+        dtmfSummary.summaryLines.forEach((line) => lines.push(`• ${line}`));
+
         const notes = [];
         notes.push(`Entries captured: ${formattedDtmf.length}`);
         if (timestamp) {
@@ -398,50 +428,51 @@ class EnhancedWebhookService {
         if (providerLabel) {
           notes.push(`Source: ${providerLabel}`);
         }
-        sections.push(`<i>${notes.map((note) => this.escapeHtml(note)).join(' • ')}</i>`);
-        sections.push(
+        lines.push(notes.join(' • '));
+        lines.push(
           dtmfSummary.containsRaw
-            ? '<i>🚧 Dev compliance mode — raw digits displayed.</i>'
-            : '<i>Digits masked per active compliance policy.</i>'
+            ? '🚧 Dev compliance mode — raw digits displayed.'
+            : 'Digits masked per active compliance policy.'
         );
       }
 
-      sections.push('');
-      sections.push('<b>Conversation:</b>');
+      lines.push('');
+      lines.push('Conversation:');
 
       const maxMessages = 12;
       for (let i = 0; i < Math.min(transcripts.length, maxMessages); i++) {
         const entry = transcripts[i];
-        const speakerLabel = entry.speaker === 'user' ? '👤 <b>Customer</b>' : '🤖 <b>AI</b>';
+        const speakerLabel = entry.speaker === 'user' ? '👤 Customer' : '🤖 AI';
         const timestamp = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : null;
-        const timeLine = timestamp ? ` <i>(${this.escapeHtml(timestamp)})</i>` : '';
         const messageText = entry.clean_message || entry.message || entry.raw_message || '';
-        const formattedMessage = this.formatHtmlLines(messageText);
-        sections.push(`${speakerLabel}${timeLine}: ${formattedMessage}`);
+        const body = messageText.split('\n').map((line) => line.trim()).filter(Boolean).join('\n');
+        lines.push(timestamp ? `${speakerLabel} (${timestamp}):` : `${speakerLabel}:`);
+        lines.push(body);
       }
 
       if (transcripts.length > maxMessages) {
-        sections.push(`<i>… and ${transcripts.length - maxMessages} more messages</i>`);
-        sections.push(`Use <code>/transcript ${this.escapeHtml(call_sid)}</code> for full details`);
+        lines.push(`… and ${transcripts.length - maxMessages} more messages`);
+        lines.push(`Use /transcript ${call_sid} for full details.`);
       }
 
       if (callDetails.call_summary) {
-        sections.push('');
-        sections.push(`<b>Summary:</b> ${this.formatHtmlLines(callDetails.call_summary)}`);
+        lines.push('');
+        lines.push('Summary:');
+        lines.push(callDetails.call_summary);
       }
 
-      const htmlMessage = sections.join('<br>');
+      const messageText = buildTelegramMessage(lines);
 
-      if (htmlMessage.length > 4000) {
-        const chunks = this.splitMessage(htmlMessage, 3900);
+      if (messageText.length > 4000) {
+        const chunks = this.splitMessage(messageText, 3900);
         for (let i = 0; i < chunks.length; i++) {
-          await this.sendTelegramMessage(telegram_chat_id, chunks[i], 'HTML');
+          await this.sendTelegramMessage(telegram_chat_id, chunks[i]);
           if (i < chunks.length - 1) {
             await this.delay(1500);
           }
         }
       } else {
-        await this.sendTelegramMessage(telegram_chat_id, htmlMessage, 'HTML');
+        await this.sendTelegramMessage(telegram_chat_id, messageText);
       }
 
       console.log(`✅ Sent enhanced transcript for call ${call_sid}`.green);
@@ -476,8 +507,7 @@ class EnhancedWebhookService {
       if (!entries || entries.length === 0) {
         await this.sendTelegramMessage(
           telegram_chat_id,
-          '🔢 Keypad entry notification received but no digits were captured.',
-          'HTML'
+          buildTelegramMessage(['🔢 Keypad entry notification received but no digits were captured.'])
         );
         return true;
       }
@@ -489,34 +519,38 @@ class EnhancedWebhookService {
       const metadata = latestEntry?.metadata || {};
       const sourceLabel = (metadata.source || latestEntry?.provider || 'unknown').toString().toUpperCase();
 
-      const sections = [];
-      sections.push(
-        containsRaw ? '⚠️ <b>Keypad Digits Captured</b>' : '🔢 <b>Keypad Digits Captured</b>'
-      );
-      sections.push('');
+      const lines = [];
+      lines.push(containsRaw ? '⚠️ Keypad Summary' : '🔢 Keypad Summary');
+      lines.push('');
 
       if (summaryLines.length > 0) {
-        const bulletLines = summaryLines.map((line) => `&#8226; ${this.escapeHtml(line)}`);
-        sections.push(bulletLines.join('<br>'));
-        sections.push('');
+        summaryLines.forEach((line) => lines.push(line));
+      } else {
+        lines.push('No keypad digits recorded.');
       }
 
-      const details = [];
-      details.push(`Entries captured: ${formattedEntries.length}`);
-      if (timestamp) {
-        details.push(`Last updated ${timestamp}`);
+      if (timestamp || sourceLabel) {
+        const metaSegments = [];
+        if (timestamp) {
+          metaSegments.push(`Last updated ${timestamp}`);
+        }
+        if (sourceLabel) {
+          metaSegments.push(`Source: ${sourceLabel}`);
+        }
+        if (metaSegments.length) {
+          lines.push('');
+          lines.push(metaSegments.join(' • '));
+        }
       }
-      if (sourceLabel) {
-        details.push(`Source: ${sourceLabel}`);
-      }
-      sections.push(`<b>Details:</b> ${this.escapeHtml(details.join(' • '))}`);
-      sections.push(
+
+      lines.push('');
+      lines.push(
         containsRaw
-          ? '<i>🚧 Dev compliance mode — raw digits displayed. Handle with care.</i>'
-          : '<i>Digits masked per active compliance policy.</i>'
+          ? '🚧 Dev compliance mode — raw digits displayed. Handle with care.'
+          : 'Digits masked per active compliance policy.'
       );
 
-      await this.sendTelegramMessage(telegram_chat_id, sections.join('<br>'), 'HTML');
+      await this.sendTelegramMessage(telegram_chat_id, buildTelegramMessage(lines));
 
       if (this.db && this.db.logNotificationMetric) {
         await this.db.logNotificationMetric('call_input_dtmf', true);
@@ -555,15 +589,31 @@ class EnhancedWebhookService {
         case 'call_in_progress':
           success = await this.sendCallStatusUpdate(call_sid, 'answered', telegram_chat_id);
           break;
-        case 'call_completed':
-          const callDetails = await this.db.getCall(call_sid);
+        case 'call_completed': {
+          const [callDetails, dtmfEntries] = await Promise.all([
+            this.db.getCall(call_sid),
+            this.db.getCallDtmfEntries(call_sid),
+          ]);
           success = await this.sendCallStatusUpdate(call_sid, 'completed', telegram_chat_id, { 
-            duration: callDetails?.duration 
+            duration: callDetails?.duration,
+            sensitive_dtmf: isSensitiveDtmf(dtmfEntries),
           });
           break;
-        case 'call_transcript':
-          success = await this.sendCallTranscript(call_sid, telegram_chat_id);
+        }
+        case 'call_transcript': {
+          const dtmfEntries = await this.db.getCallDtmfEntries(call_sid);
+          const isSensitive = isSensitiveDtmf(dtmfEntries);
+          if (isSensitive) {
+            console.log(`🔒 Suppressing transcript for sensitive DTMF call ${call_sid}`.yellow);
+            if (this.db && this.db.logNotificationMetric) {
+              await this.db.logNotificationMetric('call_transcript', true);
+            }
+            success = true;
+          } else {
+            success = await this.sendCallTranscript(call_sid, telegram_chat_id);
+          }
           break;
+        }
         case 'call_input_dtmf':
         case 'call_dtmf_captured':
           success = await this.sendCallInputNotification(call_sid, telegram_chat_id);
@@ -615,20 +665,24 @@ class EnhancedWebhookService {
   }
 
   // Enhanced Telegram message sending with markdown support
-  async sendTelegramMessage(chatId, message, parseMode = null, replyMarkup = null) {
+  async sendTelegramMessage(chatId, message, parseMode = 'HTML', replyMarkup = null) {
     const url = `https://api.telegram.org/bot${this.telegramBotToken}/sendMessage`;
-    
+    const sanitizedText = sanitizeTelegramText(message);
     const payload = {
       chat_id: chatId,
-      text: message,
+      text: sanitizedText,
       disable_web_page_preview: true
     };
 
     let resolvedParseMode = null;
-    if (parseMode === true) {
+    if (parseMode === false || parseMode === null) {
+      resolvedParseMode = null;
+    } else if (parseMode === true) {
       resolvedParseMode = 'Markdown';
     } else if (typeof parseMode === 'string' && parseMode.trim().length > 0) {
       resolvedParseMode = parseMode;
+    } else {
+      resolvedParseMode = 'HTML';
     }
 
     if (resolvedParseMode) {
@@ -656,18 +710,20 @@ class EnhancedWebhookService {
   // Debug method for troubleshooting
   async sendDebugInfo(call_sid, telegram_chat_id, webhookData) {
     try {
-      const debugMessage = `🔍 *Debug Info* for Call ${call_sid.slice(-6)}:
-      
-📊 *Status:* ${webhookData.CallStatus}
-⏱️ *Duration:* ${webhookData.Duration || 'N/A'}
-📱 *AnsweredBy:* ${webhookData.AnsweredBy || 'N/A'}
-🔢 *CallDuration:* ${webhookData.CallDuration || 'N/A'}
-📞 *DialDuration:* ${webhookData.DialCallDuration || 'N/A'}
-❌ *Error:* ${webhookData.ErrorCode || 'None'}
-🔗 *From:* ${webhookData.From || 'N/A'}
-🎯 *To:* ${webhookData.To || 'N/A'}`;
+      const debugMessage = buildTelegramMessage([
+        `🔍 Debug Info for Call ${call_sid.slice(-6)}`,
+        '',
+        `Status: ${webhookData.CallStatus}`,
+        `Duration: ${webhookData.Duration || 'N/A'}`,
+        `AnsweredBy: ${webhookData.AnsweredBy || 'N/A'}`,
+        `CallDuration: ${webhookData.CallDuration || 'N/A'}`,
+        `DialDuration: ${webhookData.DialCallDuration || 'N/A'}`,
+        `Error: ${webhookData.ErrorCode || 'None'}`,
+        `From: ${webhookData.From || 'N/A'}`,
+        `To: ${webhookData.To || 'N/A'}`
+      ]);
 
-        await this.sendTelegramMessage(telegram_chat_id, debugMessage, true);
+        await this.sendTelegramMessage(telegram_chat_id, debugMessage);
       return true;
     } catch (error) {
       console.error('Failed to send debug info:', error);
@@ -690,11 +746,13 @@ class EnhancedWebhookService {
     return statusEmojis[status] || '📱';
   }
 
-  buildCallFollowUpKeyboard(callSid, status) {
+  buildCallFollowUpKeyboard(callSid, status, options = {}) {
     if (!callSid) return null;
 
     const sid = String(callSid);
     const base = `FOLLOWUP_CALL:${sid}:`;
+
+    const allowTranscriptButton = options.allowTranscript !== false;
 
     const rows = [
       [
@@ -707,33 +765,13 @@ class EnhancedWebhookService {
     ];
 
     // Offer transcript view only when call actually connected/completed
-    if (status === 'completed' || status === 'answered') {
+    if (allowTranscriptButton && (status === 'completed' || status === 'answered')) {
       rows[1].unshift({ text: '📋 View transcript', callback_data: `${base}transcript` });
     }
 
     return {
       inline_keyboard: rows
     };
-  }
-
-  cleanMessageForTelegram(message) {
-    // Clean up message for better Telegram display
-    return message
-      .replace(/[*_`\[\]()~>#+=|{}.!-]/g, '\\$&') // Escape markdown chars
-      .replace(/•/g, '') // Remove TTS markers
-      .trim();
-  }
-
-  escapeHtml(text = '') {
-    return String(text)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
-  }
-
-  formatHtmlLines(text = '') {
-    return this.escapeHtml(text).replace(/\n/g, '<br>');
   }
 
   splitMessage(message, maxLength) {
