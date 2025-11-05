@@ -166,6 +166,9 @@ class EnhancedDatabase {
                 ai_analysis TEXT,
                 business_context TEXT,
                 generated_functions TEXT,
+                provider TEXT DEFAULT 'twilio',
+                provider_contact_id TEXT,
+                provider_metadata TEXT,
                 answered_by TEXT,
                 error_code TEXT,
                 error_message TEXT,
@@ -229,6 +232,13 @@ class EnhancedDatabase {
                 FOREIGN KEY(call_sid) REFERENCES calls(call_sid)
             )`,
 
+            // System settings table for runtime configuration
+            `CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )`,
+
             // Notification delivery metrics for analytics - FIXED: Added UNIQUE constraint
             `CREATE TABLE IF NOT EXISTS notification_metrics (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -290,6 +300,29 @@ class EnhancedDatabase {
             });
         }
 
+        const columnMigrations = [
+            { sql: "ALTER TABLE calls ADD COLUMN provider TEXT DEFAULT 'twilio'", column: 'provider' },
+            { sql: 'ALTER TABLE calls ADD COLUMN provider_contact_id TEXT', column: 'provider_contact_id' },
+            { sql: 'ALTER TABLE calls ADD COLUMN provider_metadata TEXT', column: 'provider_metadata' }
+        ];
+
+        for (const migration of columnMigrations) {
+            await new Promise((resolve, reject) => {
+                this.db.run(migration.sql, (err) => {
+                    if (err) {
+                        if (err.message.includes('duplicate column name')) {
+                            resolve();
+                        } else {
+                            console.error(`Error applying column migration for ${migration.column}:`, err);
+                            reject(err);
+                        }
+                    } else {
+                        resolve();
+                    }
+                });
+            });
+        }
+
         // Create comprehensive indexes for optimal performance
         const indexes = [
             // Call indexes
@@ -326,6 +359,9 @@ class EnhancedDatabase {
             'CREATE INDEX IF NOT EXISTS idx_metrics_type ON notification_metrics(notification_type)',
             'CREATE INDEX IF NOT EXISTS idx_call_metrics_call_sid ON call_metrics(call_sid)',
             'CREATE INDEX IF NOT EXISTS idx_call_metrics_type ON call_metrics(metric_type)',
+
+            // Settings indexes
+            'CREATE INDEX IF NOT EXISTS idx_system_settings_updated ON system_settings(updated_at)',
             
             // Health indexes
             'CREATE INDEX IF NOT EXISTS idx_health_service ON service_health_logs(service_name)',
@@ -363,16 +399,20 @@ class EnhancedDatabase {
             first_message, 
             user_chat_id, 
             business_context = null,
-            generated_functions = null 
+            generated_functions = null,
+            provider = 'twilio',
+            provider_contact_id = null,
+            provider_metadata = null
         } = callData;
         
         return new Promise((resolve, reject) => {
             const stmt = this.db.prepare(`
                 INSERT INTO calls (
                     call_sid, phone_number, prompt, first_message, 
-                    user_chat_id, status, business_context, generated_functions
+                    user_chat_id, status, business_context, generated_functions,
+                    provider, provider_contact_id, provider_metadata
                 )
-                VALUES (?, ?, ?, ?, ?, 'initiated', ?, ?)
+                VALUES (?, ?, ?, ?, ?, 'initiated', ?, ?, ?, ?, ?)
             `);
             
             stmt.run([
@@ -382,7 +422,10 @@ class EnhancedDatabase {
                 first_message, 
                 user_chat_id, 
                 business_context,
-                generated_functions
+                generated_functions,
+                provider,
+                provider_contact_id,
+                provider_metadata ? JSON.stringify(provider_metadata) : null
             ], function(err) {
                 if (err) {
                     reject(err);
@@ -400,6 +443,10 @@ class EnhancedDatabase {
             let updateFields = ['status = ?'];
             let values = [status];
 
+            if (additionalData.provider_metadata && typeof additionalData.provider_metadata === 'object') {
+                additionalData.provider_metadata = JSON.stringify(additionalData.provider_metadata);
+            }
+
             // Handle all possible additional data fields
             const fieldMappings = {
                 'started_at': 'started_at',
@@ -412,7 +459,10 @@ class EnhancedDatabase {
                 'error_code': 'error_code',
                 'error_message': 'error_message',
                 'ring_duration': 'ring_duration',
-                'answer_delay': 'answer_delay'
+                'answer_delay': 'answer_delay',
+                'provider': 'provider',
+                'provider_contact_id': 'provider_contact_id',
+                'provider_metadata': 'provider_metadata'
             };
 
             Object.entries(fieldMappings).forEach(([key, field]) => {
@@ -433,6 +483,71 @@ class EnhancedDatabase {
                     resolve(this.changes);
                 }
             });
+        });
+    }
+
+    async getSystemSetting(key) {
+        if (!key) {
+            return null;
+        }
+        return new Promise((resolve, reject) => {
+            this.db.get(
+                `SELECT value FROM system_settings WHERE key = ?`,
+                [key],
+                (err, row) => {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve(row ? row.value : null);
+                    }
+                }
+            );
+        });
+    }
+
+    async setSystemSetting(key, value) {
+        if (!key) {
+            throw new Error('System setting key is required');
+        }
+        return new Promise((resolve, reject) => {
+            this.db.run(
+                `INSERT INTO system_settings (key, value, updated_at)
+                 VALUES (?, ?, CURRENT_TIMESTAMP)
+                 ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = CURRENT_TIMESTAMP`,
+                [key, value],
+                function (err) {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve({ changes: this.changes });
+                    }
+                }
+            );
+        });
+    }
+
+    async getSystemSettings() {
+        return new Promise((resolve, reject) => {
+            this.db.all(
+                `SELECT key, value, updated_at FROM system_settings`,
+                [],
+                (err, rows) => {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        const settings = {};
+                        (rows || []).forEach((row) => {
+                            settings[row.key] = {
+                                value: row.value,
+                                updated_at: row.updated_at
+                            };
+                        });
+                        resolve(settings);
+                    }
+                }
+            );
         });
     }
 

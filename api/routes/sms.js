@@ -3,12 +3,19 @@ const axios = require('axios');
 const PersonaComposer = require('../services/PersonaComposer');
 
 class EnhancedSmsService extends EventEmitter {
-    constructor() {
+    constructor(options = {}) {
         super();
-        this.twilio = require('twilio')(
-            process.env.TWILIO_ACCOUNT_SID,
-            process.env.TWILIO_AUTH_TOKEN
-        );
+        const { provider = 'twilio', awsAdapter = null, twilioClient = null } = options;
+        this.provider = provider;
+        if (provider === 'twilio') {
+            this.twilio = twilioClient || require('twilio')(
+                process.env.TWILIO_ACCOUNT_SID,
+                process.env.TWILIO_AUTH_TOKEN
+            );
+        } else {
+            this.twilio = twilioClient || null;
+        }
+        this.awsAdapter = awsAdapter || null;
         this.openai = new(require('openai'))({
             baseURL: "https://openrouter.ai/api/v1",
             apiKey: process.env.OPENROUTER_API_KEY,
@@ -32,6 +39,7 @@ class EnhancedSmsService extends EventEmitter {
             technicalLevel: 'general'
         };
         this.db = null;
+        this.vonageAdapter = null;
         this.builtinTemplates = {
             welcome: {
                 name: 'welcome',
@@ -86,6 +94,40 @@ class EnhancedSmsService extends EventEmitter {
 
     setDatabase(database) {
         this.db = database;
+    }
+
+    setSmsAdapter(adapter) {
+        this.awsAdapter = adapter;
+    }
+
+    setProvider(provider, adapter = null) {
+        this.provider = provider;
+        if (provider === 'aws') {
+            if (adapter) {
+                this.awsAdapter = adapter;
+            }
+            this.vonageAdapter = null;
+        } else if (provider === 'vonage') {
+            if (adapter) {
+                this.vonageAdapter = adapter;
+            }
+            if (!this.twilio) {
+                this.twilio = require('twilio')(
+                    process.env.TWILIO_ACCOUNT_SID,
+                    process.env.TWILIO_AUTH_TOKEN
+                );
+            }
+            this.awsAdapter = null;
+        } else {
+            this.awsAdapter = null;
+            this.vonageAdapter = null;
+            if (!this.twilio) {
+                this.twilio = require('twilio')(
+                    process.env.TWILIO_ACCOUNT_SID,
+                    process.env.TWILIO_AUTH_TOKEN
+                );
+            }
+        }
     }
 
     updateDefaultPersona(options = {}) {
@@ -164,7 +206,7 @@ class EnhancedSmsService extends EventEmitter {
         try {
             const fromNumber = from || process.env.FROM_NUMBER;
 
-            if (!fromNumber) {
+            if (this.provider !== 'aws' && !fromNumber) {
                 throw new Error('No FROM_NUMBER configured for SMS');
             }
 
@@ -186,31 +228,82 @@ class EnhancedSmsService extends EventEmitter {
 
             console.log(`📱 Sending SMS to ${to}: ${message.substring(0, 50)}...`);
 
-            const smsMessage = await this.twilio.messages.create({
-                body: message,
-                from: fromNumber,
-                to: to,
-                statusCallback: `https://${process.env.SERVER}/webhook/sms-status`
-            });
+            let providerResponse = null;
+            let messageSid = null;
+            let status = null;
+            let fromNumberUsed = fromNumber;
 
-            console.log(`✅ SMS sent successfully: ${smsMessage.sid}`);
+            if (this.provider === 'aws') {
+                if (!this.awsAdapter) {
+                    throw new Error('AWS Pinpoint adapter not configured');
+                }
+                const response = await this.awsAdapter.sendSms({
+                    to,
+                    body: message,
+                    from: from || undefined,
+                    context: {
+                        persona: conversation.persona?.name || 'default'
+                    }
+                });
+
+                const result = response?.MessageResponse?.Result?.[to] || {};
+                providerResponse = response;
+                messageSid = result.MessageId || null;
+                status = result.DeliveryStatus || 'SUBMITTED';
+                fromNumberUsed = result.OriginationNumber || from || this.awsAdapter?.config?.pinpoint?.originationNumber || null;
+            } else if (this.provider === 'vonage') {
+                if (!this.vonageAdapter) {
+                    throw new Error('Vonage SMS adapter not configured');
+                }
+
+                const response = await this.vonageAdapter.sendSms({
+                    to,
+                    body: message,
+                    from,
+                    statusCallback: `https://${process.env.SERVER}/webhook/sms-status`
+                });
+
+                const [vonageResult] = response.messages || [];
+                providerResponse = response;
+                messageSid = vonageResult?.['message-id'] || null;
+                status = vonageResult?.status === '0' ? 'sent' : vonageResult?.status || 'unknown';
+                fromNumberUsed = from || this.vonageAdapter.fromNumber || null;
+            } else {
+                if (!fromNumber) {
+                    throw new Error('No FROM_NUMBER configured for SMS');
+                }
+
+                const smsMessage = await this.twilio.messages.create({
+                    body: message,
+                    from: fromNumber,
+                    to: to,
+                    statusCallback: `https://${process.env.SERVER}/webhook/sms-status`
+                });
+
+                providerResponse = smsMessage;
+                messageSid = smsMessage.sid;
+                status = smsMessage.status;
+                fromNumberUsed = fromNumber;
+            }
 
             conversation.messages.push({
                 role: 'assistant',
                 content: message,
                 timestamp: new Date(),
-                message_sid: smsMessage.sid
+                message_sid: messageSid,
+                provider: this.provider
             });
             conversation.last_activity = new Date();
 
             return {
                 success: true,
-                message_sid: smsMessage.sid,
+                message_sid: messageSid,
                 to: to,
-                from: fromNumber,
+                from: fromNumberUsed,
                 body: message,
-                status: smsMessage.status,
-                persona: conversation.persona
+                status,
+                persona: conversation.persona,
+                providerResponse
             };
         } catch (error) {
             console.error('❌ SMS sending error:', error);

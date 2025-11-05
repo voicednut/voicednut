@@ -1,4 +1,6 @@
 require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
 
 const isProduction = process.env.NODE_ENV === 'production';
 
@@ -35,11 +37,83 @@ const corsOrigins = corsOriginsRaw
   .map((origin) => origin.trim())
   .filter(Boolean);
 
+const callProvider = ensure('CALL_PROVIDER', 'twilio').toLowerCase();
+const awsRegion = ensure('AWS_REGION', 'us-east-1');
+const adminApiToken = readEnv('ADMIN_API_TOKEN');
+
+function loadPrivateKey(rawValue) {
+  if (!rawValue) {
+    return undefined;
+  }
+
+  const normalized = rawValue.replace(/\\n/g, '\n');
+  if (normalized.includes('-----BEGIN')) {
+    return normalized;
+  }
+
+  try {
+    const filePath = path.isAbsolute(normalized)
+      ? normalized
+      : path.join(process.cwd(), normalized);
+    return fs.readFileSync(filePath, 'utf8');
+  } catch (error) {
+    console.warn(`Unable to load Vonage private key from path "${normalized}": ${error.message}`);
+    return undefined;
+  }
+}
+
+const vonagePrivateKey = loadPrivateKey(readEnv('VONAGE_PRIVATE_KEY'));
+
 module.exports = {
+  platform: {
+    provider: callProvider,
+  },
   twilio: {
     accountSid: ensure('TWILIO_ACCOUNT_SID'),
     authToken: ensure('TWILIO_AUTH_TOKEN'),
     fromNumber: ensure('FROM_NUMBER'),
+  },
+  aws: {
+    region: awsRegion,
+    connect: {
+      instanceId: ensure('AWS_CONNECT_INSTANCE_ID', ''),
+      contactFlowId: ensure('AWS_CONNECT_CONTACT_FLOW_ID', ''),
+      queueId: readEnv('AWS_CONNECT_QUEUE_ID'),
+      sourcePhoneNumber: readEnv('AWS_CONNECT_SOURCE_PHONE_NUMBER'),
+      transcriptsQueueUrl: readEnv('AWS_TRANSCRIPTS_QUEUE_URL'),
+      eventBusName: readEnv('AWS_EVENT_BUS_NAME'),
+    },
+    polly: {
+      voiceId: ensure('AWS_POLLY_VOICE_ID', 'Joanna'),
+      outputBucket: readEnv('AWS_POLLY_OUTPUT_BUCKET'),
+      outputPrefix: readEnv('AWS_POLLY_OUTPUT_PREFIX') || 'tts/',
+    },
+    s3: {
+      mediaBucket: readEnv('AWS_MEDIA_BUCKET') || readEnv('AWS_POLLY_OUTPUT_BUCKET'),
+    },
+    pinpoint: {
+      applicationId: readEnv('AWS_PINPOINT_APPLICATION_ID'),
+      originationNumber: readEnv('AWS_PINPOINT_ORIGINATION_NUMBER') || readEnv('AWS_CONNECT_SOURCE_PHONE_NUMBER'),
+      region: readEnv('AWS_PINPOINT_REGION') || awsRegion,
+    },
+    transcribe: {
+      languageCode: ensure('AWS_TRANSCRIBE_LANGUAGE_CODE', 'en-US'),
+      vocabularyFilterName: readEnv('AWS_TRANSCRIBE_VOCABULARY_FILTER_NAME'),
+    },
+  },
+  vonage: {
+    apiKey: readEnv('VONAGE_API_KEY'),
+    apiSecret: readEnv('VONAGE_API_SECRET'),
+    applicationId: readEnv('VONAGE_APPLICATION_ID'),
+    privateKey: vonagePrivateKey,
+    voice: {
+      fromNumber: readEnv('VONAGE_VOICE_FROM_NUMBER'),
+      answerUrl: readEnv('VONAGE_ANSWER_URL'),
+      eventUrl: readEnv('VONAGE_EVENT_URL'),
+    },
+    sms: {
+      fromNumber: readEnv('VONAGE_SMS_FROM_NUMBER'),
+    },
   },
   telegram: {
     botToken: ensure('TELEGRAM_BOT_TOKEN', process.env.BOT_TOKEN),
@@ -62,5 +136,8 @@ module.exports = {
       windowMs: Number(ensure('RATE_LIMIT_WINDOW_MS', '60000')),
       max: Number(ensure('RATE_LIMIT_MAX', '300')),
     },
+  },
+  admin: {
+    apiToken: adminApiToken,
   },
 };

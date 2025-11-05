@@ -8,7 +8,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
 
-const { server: serverConfig, twilio: twilioConfig } = require('./config');
+const { platform, server: serverConfig, twilio: twilioConfig, aws: awsConfig, vonage: vonageConfig, admin: adminConfig } = require('./config');
 const { EnhancedGptService, DEFAULT_SYSTEM_PROMPT, DEFAULT_FIRST_MESSAGE } = require('./routes/gpt');
 const { getBusinessProfile } = require('./config/business');
 const { StreamService } = require('./routes/stream');
@@ -21,6 +21,8 @@ const { webhookService } = require('./routes/status');
 const DynamicFunctionEngine = require('./functions/DynamicFunctionEngine');
 const PersonaComposer = require('./services/PersonaComposer');
 const DEFAULT_PERSONAS = require('./functions/personas');
+const { AwsConnectAdapter, AwsTtsAdapter, AwsSmsAdapter, VonageVoiceAdapter, VonageSmsAdapter } = require('./adapters');
+const { v4: uuidv4 } = require('uuid');
 
 const VoiceResponse = require('twilio').twiml.VoiceResponse;
 
@@ -58,6 +60,10 @@ const {
   authToken: twilioAuthToken,
   fromNumber: twilioFromNumber,
 } = twilioConfig;
+const missingTwilioEnv = [];
+if (!twilioAccountSid) missingTwilioEnv.push('TWILIO_ACCOUNT_SID');
+if (!twilioAuthToken) missingTwilioEnv.push('TWILIO_AUTH_TOKEN');
+if (!twilioFromNumber) missingTwilioEnv.push('FROM_NUMBER');
 
 // Enhanced call configurations with function context
 const callConfigurations = new Map();
@@ -66,8 +72,345 @@ const callFunctionSystems = new Map(); // Store generated functions per call
 
 let db;
 const functionEngine = new DynamicFunctionEngine();
-const smsService = new EnhancedSmsService();
+const SUPPORTED_CALL_PROVIDERS = ['twilio', 'aws', 'vonage'];
+let currentProvider = SUPPORTED_CALL_PROVIDERS.includes(platform.provider)
+  ? platform.provider
+  : 'twilio';
+platform.provider = currentProvider;
+let isAwsProvider = currentProvider === 'aws';
+const smsService = new EnhancedSmsService({
+  provider: currentProvider
+});
 const personaComposer = new PersonaComposer();
+const awsCallSessions = new Map();
+const awsContactIndex = new Map();
+const vonageCallIndex = new Map();
+let awsAdapters = null;
+let vonageAdapters = null;
+
+async function ensureAwsAdapters() {
+  if (awsAdapters) {
+    return awsAdapters;
+  }
+  try {
+    awsAdapters = {
+      connect: new AwsConnectAdapter(awsConfig),
+      tts: new AwsTtsAdapter(awsConfig),
+      sms: new AwsSmsAdapter(awsConfig)
+    };
+    console.log('✅ AWS adapters initialized (Connect, Polly, Pinpoint)'.green);
+    return awsAdapters;
+  } catch (error) {
+    awsAdapters = null;
+    console.error('❌ Failed to initialize AWS adapters:', error.message);
+    throw error;
+  }
+}
+
+async function ensureVonageAdapters() {
+  if (vonageAdapters) {
+    return vonageAdapters;
+  }
+
+  const { apiKey, apiSecret, applicationId, privateKey } = vonageConfig || {};
+  if (!apiKey || !apiSecret || !applicationId || !privateKey) {
+    throw new Error('Vonage configuration is incomplete. Set VONAGE_API_KEY, VONAGE_API_SECRET, VONAGE_APPLICATION_ID, and VONAGE_PRIVATE_KEY.');
+  }
+
+  try {
+    vonageAdapters = {
+      voice: new VonageVoiceAdapter(vonageConfig),
+      sms: new VonageSmsAdapter(vonageConfig),
+    };
+    console.log('✅ Vonage adapters initialized (Voice, SMS)'.green);
+    return vonageAdapters;
+  } catch (error) {
+    vonageAdapters = null;
+    console.error('❌ Failed to initialize Vonage adapters:', error.message);
+    throw error;
+  }
+}
+
+async function applyProvider(provider, options = {}) {
+  const normalized = SUPPORTED_CALL_PROVIDERS.includes((provider || '').toLowerCase())
+    ? provider.toLowerCase()
+    : 'twilio';
+  const { persist = true } = options;
+  const previousProvider = currentProvider;
+
+  if (normalized === 'twilio' && previousProvider !== 'twilio') {
+    if (!twilioAccountSid || !twilioAuthToken || !twilioFromNumber) {
+      throw new Error('Twilio credentials are required to activate the Twilio provider');
+    }
+  }
+
+  if (normalized === 'aws') {
+    await ensureAwsAdapters();
+    smsService.setProvider('aws', awsAdapters?.sms || null);
+    vonageCallIndex.clear();
+  } else if (normalized === 'vonage') {
+    const adapters = await ensureVonageAdapters();
+    if (!vonageConfig?.voice?.fromNumber) {
+      console.warn('⚠️ Vonage voice from number not configured. Calls may fail.'.yellow);
+    }
+    smsService.setProvider('vonage', adapters?.sms || null);
+    awsCallSessions.clear();
+    awsContactIndex.clear();
+  } else {
+    if (!twilioAccountSid || !twilioAuthToken || !twilioFromNumber) {
+      console.warn('⚠️ Twilio provider active but Twilio credentials appear incomplete. Outbound calls may fail.'.yellow);
+    }
+    smsService.setProvider('twilio');
+    awsCallSessions.clear();
+    awsContactIndex.clear();
+    if (normalized === 'twilio') {
+      vonageCallIndex.clear();
+    }
+  }
+
+  currentProvider = normalized;
+  isAwsProvider = normalized === 'aws';
+  platform.provider = currentProvider;
+
+  if (persist && db && typeof db.setSystemSetting === 'function') {
+    try {
+      await db.setSystemSetting('call_provider', currentProvider);
+    } catch (error) {
+      console.error('Failed to persist call provider setting:', error);
+    }
+  }
+
+  if (previousProvider !== currentProvider) {
+    console.log(`🔁 Switched active call provider: ${previousProvider?.toUpperCase()} → ${currentProvider.toUpperCase()}`.cyan);
+  } else {
+    console.log(`ℹ️ Call provider remains ${currentProvider.toUpperCase()}`.gray);
+  }
+
+  return { changed: previousProvider !== currentProvider, provider: currentProvider };
+}
+
+async function synchronizeProviderFromSettings() {
+  if (!db || typeof db.getSystemSetting !== 'function') {
+    return;
+  }
+  try {
+    const storedProvider = await db.getSystemSetting('call_provider');
+    if (storedProvider) {
+      await applyProvider(storedProvider, { persist: false });
+    } else {
+      await applyProvider(currentProvider, { persist: true });
+    }
+  } catch (error) {
+    console.error('Failed to synchronize call provider from settings:', error);
+  }
+}
+
+function requireAdminAuth(req, res, next) {
+  if (!adminConfig?.apiToken) {
+    res.status(503).json({ error: 'Admin API token not configured' });
+    return;
+  }
+
+  const headerToken = req.headers['x-admin-token'] || req.headers['x-admin-secret'];
+  const queryToken = req.query?.admin_token;
+  const providedToken = (headerToken || queryToken || '').toString();
+
+  if (providedToken !== adminConfig.apiToken) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  next();
+}
+
+function buildGptService(callSid, callConfig, functionSystem) {
+  let gptService;
+  const hasAdaptiveConfig = callConfig && functionSystem;
+  if (hasAdaptiveConfig) {
+    const context = functionSystem.context || {};
+    console.log(`🎭 Using adaptive configuration for ${context.industry || 'general'} industry`.green);
+    console.log(`🔧 Available functions: ${Object.keys(functionSystem.implementations).join(', ')}`.cyan);
+
+    const promptOverride = callConfig.promptOverride ?? null;
+    const firstMessageOverride = callConfig.firstMessageOverride ?? null;
+    gptService = new EnhancedGptService(promptOverride, firstMessageOverride);
+    gptService.setDynamicFunctions(functionSystem.functions, functionSystem.implementations);
+  } else {
+    console.log(`🎯 Standard call detected: ${callSid}`.yellow);
+    gptService = new EnhancedGptService();
+  }
+
+  gptService.setCallSid(callSid);
+  if (callConfig?.persona_metadata) {
+    gptService.setPersonaMetadata(callConfig.persona_metadata);
+  }
+
+  return gptService;
+}
+
+async function synthesizeAndQueueAwsSpeech(session, message, interactionCount, options = {}) {
+  if (!message || !awsAdapters?.tts || !awsAdapters?.connect) {
+    return;
+  }
+
+  try {
+    const voiceOptions = {};
+    if (options.voiceId || session.voiceModel) {
+      voiceOptions.voiceId = options.voiceId || session.voiceModel;
+    }
+
+    const metadata = {
+      call_sid: session.callSid,
+      interaction_index: interactionCount,
+      personality: options.personalityName || 'default'
+    };
+
+    const result = await awsAdapters.tts.synthesizeToS3(message, {
+      ...metadata,
+      ...voiceOptions
+    });
+
+    await awsAdapters.connect.enqueueAudioPlayback({
+      contactId: session.contactId,
+      audioKey: result.key,
+      additionalAttributes: {
+        NEXT_PROMPT_BUCKET: result.bucket,
+        NEXT_PROMPT_TEXT: message,
+        INTERACTION_INDEX: String(interactionCount),
+        CALL_SID: session.callSid
+      }
+    });
+
+    await db.updateCallState(session.callSid, 'ai_audio_enqueued', {
+      interaction_count: interactionCount,
+      s3_bucket: result.bucket,
+      s3_key: result.key
+    });
+  } catch (error) {
+    console.error('Failed to synthesize or enqueue AWS speech:', error);
+    await db.logServiceHealth('aws_tts', 'error', {
+      call_sid: session.callSid,
+      message: error.message
+    });
+  }
+}
+
+async function handleAwsGptReply(session, gptReply, interactionIndex) {
+  const personalityInfo = gptReply.personalityInfo || {};
+  const message = gptReply.partialResponse;
+  if (!message) {
+    return;
+  }
+
+  try {
+    await db.addTranscript({
+      call_sid: session.callSid,
+      speaker: 'ai',
+      message,
+      interaction_count: interactionIndex,
+      personality_used: personalityInfo.name || 'default',
+      adaptation_data: JSON.stringify(gptReply.adaptationHistory || [])
+    });
+
+    await db.updateCallState(session.callSid, 'ai_responded', {
+      message,
+      interaction_count: interactionIndex,
+      personality: personalityInfo.name || 'default'
+    });
+  } catch (dbError) {
+    console.error('Database error adding AWS AI transcript:', dbError);
+  }
+
+  await synthesizeAndQueueAwsSpeech(session, message, interactionIndex, {
+    personalityName: personalityInfo.name || 'default',
+    voiceId: session.voiceModel
+  });
+}
+
+async function initializeAwsCallSession({
+  callSid,
+  contactId,
+  callConfig,
+  functionSystem,
+  firstMessage,
+  voiceModel,
+  phoneNumber
+}) {
+  if (!awsAdapters?.tts || !awsAdapters?.connect) {
+    console.warn('AWS adapters unavailable, cannot initialize call session');
+    return null;
+  }
+
+  const gptService = buildGptService(callSid, callConfig, functionSystem);
+  const session = {
+    callSid,
+    contactId,
+    callConfig,
+    functionSystem,
+    gptService,
+    interactionCount: 0,
+    startTime: new Date(),
+    voiceModel: voiceModel || callConfig.voice_model || null,
+    phoneNumber
+  };
+
+  gptService.on('gptreply', async (gptReply, icount) => {
+    await handleAwsGptReply(session, gptReply, icount);
+  });
+
+  gptService.on('personalityChanged', async (changeData) => {
+    try {
+      await db.updateCallState(callSid, 'personality_changed', {
+        from: changeData.from,
+        to: changeData.to,
+        reason: changeData.reason,
+        interaction_count: session.interactionCount
+      });
+    } catch (dbError) {
+      console.error('Database error logging personality change (AWS):', dbError);
+    }
+  });
+
+  awsCallSessions.set(callSid, session);
+  activeCalls.set(callSid, {
+    startTime: session.startTime,
+    transcripts: [],
+    gptService,
+    callConfig,
+    functionSystem,
+    personalityChanges: []
+  });
+
+  await db.updateCallState(callSid, 'connect_contact_started', {
+    contact_id: contactId,
+    phone_number: phoneNumber
+  });
+
+  if (firstMessage) {
+    try {
+      await db.addTranscript({
+        call_sid: callSid,
+        speaker: 'ai',
+        message: firstMessage,
+        interaction_count: 0,
+        personality_used: 'default'
+      });
+    } catch (dbError) {
+      console.error('Database error adding AWS initial transcript:', dbError);
+    }
+
+    await db.updateCallState(callSid, 'ai_intro_ready', {
+      message: firstMessage
+    });
+
+    await synthesizeAndQueueAwsSpeech(session, firstMessage, 0, {
+      personalityName: 'default',
+      voiceId: session.voiceModel
+    });
+  }
+
+  return session;
+}
 
 async function startServer() {
   try {
@@ -82,6 +425,22 @@ async function startServer() {
     if (smsService && typeof smsService.setDatabase === 'function') {
       smsService.setDatabase(db);
     }
+
+    if (currentProvider === 'twilio' && missingTwilioEnv.length > 0) {
+      const guidance = [
+        'Twilio provider selected but required credentials are missing:',
+        ` - Missing: ${missingTwilioEnv.join(', ')}`,
+        'Edit api/.env (or set environment variables) with your Twilio Account SID, Auth Token, and FROM_NUMBER.',
+        'Example:',
+        '  TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+        '  TWILIO_AUTH_TOKEN=your_twilio_auth_token',
+        '  FROM_NUMBER=+1234567890',
+        'Alternatively, run `npm run setup --prefix api` from the repo root to scaffold the .env file.',
+      ].join('\n');
+      throw new Error(guidance);
+    }
+
+    await synchronizeProviderFromSettings();
 
     // Start webhook service after database is ready
     console.log('Starting enhanced webhook service...'.yellow);
@@ -109,6 +468,10 @@ async function startServer() {
 
 // Enhanced WebSocket connection handler with dynamic functions
 app.ws('/connection', (ws) => {
+  if (isAwsProvider) {
+    ws.close(1011, 'AWS Connect does not use Twilio media streams');
+    return;
+  }
   console.log('🔌 New WebSocket connection established'.cyan);
   
   try {
@@ -136,8 +499,15 @@ app.ws('/connection', (ws) => {
         const msg = JSON.parse(data);
         
         if (msg.event === 'start') {
-          streamSid = msg.start.streamSid;
-          callSid = msg.start.callSid;
+          streamSid = msg.start.streamSid || msg.start.uuid || streamSid;
+          callSid = msg.start.callSid || msg.start?.customParameters?.call_sid || callSid;
+          const startUuid = msg.start?.uuid || msg.start?.conversationUuid || msg.start?.streamSid;
+          if (!callSid && startUuid && vonageCallIndex.has(startUuid)) {
+            callSid = vonageCallIndex.get(startUuid);
+          }
+          if (!callSid && msg.start?.conversationUuid && vonageCallIndex.has(msg.start.conversationUuid)) {
+            callSid = vonageCallIndex.get(msg.start.conversationUuid);
+          }
           callStartTime = new Date();
           
           console.log(`🎯 Adaptive call started - SID: ${callSid}`.green);
@@ -173,28 +543,7 @@ app.ws('/connection', (ws) => {
             ttsService.resetVoiceModel();
           }
 
-          if (callConfig && functionSystem) {
-            console.log(`🎭 Using adaptive configuration for ${functionSystem.context.industry} industry`.green);
-            console.log(`🔧 Available functions: ${Object.keys(functionSystem.implementations).join(', ')}`.cyan);
-            
-            // Initialize Enhanced GPT service with dynamic functions
-            const promptOverride = callConfig.promptOverride ?? null;
-            const firstMessageOverride = callConfig.firstMessageOverride ?? null;
-            gptService = new EnhancedGptService(promptOverride, firstMessageOverride);
-            
-            // Inject the dynamic function system
-            gptService.setDynamicFunctions(functionSystem.functions, functionSystem.implementations);
-            
-          } else {
-            console.log(`🎯 Standard call detected: ${callSid}`.yellow);
-            // Use default configuration for regular calls
-            gptService = new EnhancedGptService();
-          }
-          
-          gptService.setCallSid(callSid);
-          if (callConfig?.persona_metadata) {
-            gptService.setPersonaMetadata(callConfig.persona_metadata);
-          }
+          gptService = buildGptService(callSid, callConfig, functionSystem);
 
           // Set up GPT reply handler with personality tracking
           gptService.on('gptreply', async (gptReply, icount) => {
@@ -528,6 +877,10 @@ function generateCallSummary(transcripts, duration) {
 
 // Incoming endpoint used by Twilio to connect the call to our websocket stream
 app.post('/incoming', (req, res) => {
+  if (currentProvider !== 'twilio') {
+    res.status(404).json({ error: 'Incoming calls are handled by the active provider' });
+    return;
+  }
   try {
     const response = new VoiceResponse();
     const connect = response.connect();
@@ -564,19 +917,44 @@ app.post('/outbound-call', async (req, res) => {
       });
     }
 
-    const accountSid = twilioAccountSid;
-    const authToken = twilioAuthToken;
-
-    if (!accountSid || !authToken) {
-      return res.status(500).json({
-        error: 'Twilio credentials not configured'
-      });
-    }
-
     if (!number.match(/^\+[1-9]\d{1,14}$/)) {
       return res.status(400).json({
         error: 'Invalid phone number format. Use E.164 format (e.g., +1234567890)'
       });
+    }
+
+    const isTwilioProvider = currentProvider === 'twilio';
+    const isVonageProvider = currentProvider === 'vonage';
+
+    const accountSid = twilioAccountSid;
+    const authToken = twilioAuthToken;
+
+    if (isAwsProvider) {
+      if (!awsAdapters || !awsAdapters.connect) {
+        return res.status(500).json({
+          error: 'AWS Connect adapter not configured'
+        });
+      }
+    } else if (isVonageProvider) {
+      try {
+        await ensureVonageAdapters();
+      } catch (error) {
+        return res.status(500).json({
+          error: 'Vonage adapters not configured',
+          details: error.message
+        });
+      }
+    } else {
+      if (!accountSid || !authToken) {
+        return res.status(500).json({
+          error: 'Twilio credentials not configured'
+        });
+      }
+      if (!twilioFromNumber) {
+        return res.status(500).json({
+          error: 'Twilio FROM_NUMBER not configured'
+        });
+      }
     }
 
     let businessProfile = null;
@@ -598,8 +976,14 @@ app.post('/outbound-call', async (req, res) => {
 
     const channel = normalizeKey(rawChannel, 'voice');
     const normalizedPurpose = normalizeKey(purpose, 'general');
-    const normalizedEmotion = normalizeKey(emotion, businessProfile?.purposes?.[normalizedPurpose]?.recommendedEmotion || 'neutral');
-    const normalizedUrgency = normalizeKey(urgency, businessProfile?.purposes?.[normalizedPurpose]?.defaultUrgency || 'normal');
+    const normalizedEmotion = normalizeKey(
+      emotion,
+      businessProfile?.purposes?.[normalizedPurpose]?.recommendedEmotion || 'neutral'
+    );
+    const normalizedUrgency = normalizeKey(
+      urgency,
+      businessProfile?.purposes?.[normalizedPurpose]?.defaultUrgency || 'normal'
+    );
     const normalizedTechnicalLevel = normalizeKey(technicalLevel, 'general');
 
     const personaOptions = {
@@ -628,8 +1012,12 @@ app.post('/outbound-call', async (req, res) => {
       composition = personaComposer.compose(personaOptions);
     }
 
-    let selectedPrompt = composition ? composition.systemPrompt : (prompt || (businessProfile ? businessProfile.prompt : null));
-    let selectedFirstMessage = composition ? composition.firstMessage : (first_message || (businessProfile ? businessProfile.firstMessage : null));
+    let selectedPrompt = composition
+      ? composition.systemPrompt
+      : prompt || (businessProfile ? businessProfile.prompt : null);
+    let selectedFirstMessage = composition
+      ? composition.firstMessage
+      : first_message || (businessProfile ? businessProfile.firstMessage : null);
 
     if (!selectedPrompt || !selectedFirstMessage) {
       return res.status(400).json({
@@ -641,29 +1029,20 @@ app.post('/outbound-call', async (req, res) => {
     const usingDefaultFirstMessage = selectedFirstMessage === DEFAULT_FIRST_MESSAGE;
 
     console.log('🔧 Generating adaptive function system for call...'.blue);
-
-    // Generate dynamic functions based on the prompt
     const functionSystem = functionEngine.generateAdaptiveFunctionSystem(selectedPrompt, selectedFirstMessage);
-
-    console.log(`✅ Generated ${functionSystem.functions.length} functions for ${functionSystem.context.industry} industry`.green);
-
-    const client = require('twilio')(accountSid, authToken);
-
-    // Create the outbound call with enhanced callbacks
-    const call = await client.calls.create({
-      url: `${publicHttpBase}/incoming`,
-      to: number,
-      from: twilioFromNumber,
-      statusCallback: `${publicHttpBase}/webhook/call-status`,
-      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed', 'busy', 'no-answer', 'canceled', 'failed'],
-      statusCallbackMethod: 'POST'
-    });
+    console.log(
+      `✅ Generated ${functionSystem.functions.length} functions for ${functionSystem.context.industry} industry`.green
+    );
 
     const promptSource = composition
       ? 'persona_composer'
       : businessProfile
-        ? (usingDefaultPrompt && usingDefaultFirstMessage ? 'business_profile_default' : 'business_profile_custom')
-        : (usingDefaultPrompt && usingDefaultFirstMessage ? 'default' : 'custom');
+        ? usingDefaultPrompt && usingDefaultFirstMessage
+          ? 'business_profile_default'
+          : 'business_profile_custom'
+        : usingDefaultPrompt && usingDefaultFirstMessage
+          ? 'default'
+          : 'custom';
 
     const callConfig = {
       prompt: selectedPrompt,
@@ -681,12 +1060,95 @@ app.post('/outbound-call', async (req, res) => {
       voice_model: voice_model || null
     };
 
-    callConfigurations.set(call.sid, callConfig);
+    let callSid = null;
+    let providerContactId = null;
+    let providerMetadata = {};
+    let providerStatus = 'initiated';
+    let providerResponse;
 
-    // Store the generated function system for this call
-    callFunctionSystems.set(call.sid, functionSystem);
+    if (isAwsProvider) {
+      callSid = `aws-${uuidv4()}`;
+      const attributes = {
+        CALL_SID: callSid,
+        USER_CHAT_ID: user_chat_id || '',
+        PROMPT_SOURCE: promptSource,
+        BUSINESS_CONTEXT: JSON.stringify(functionSystem.context || {}),
+        FIRST_MESSAGE: selectedFirstMessage,
+        VOICE_MODEL: voice_model || ''
+      };
 
-    // Save call to database with enhanced metadata
+      providerResponse = await awsAdapters.connect.startOutboundCall({
+        destinationPhoneNumber: number,
+        clientToken: callSid,
+        attributes
+      });
+
+      providerContactId = providerResponse.ContactId;
+      providerMetadata = {
+        connect: {
+          contactId: providerResponse.ContactId,
+          initialContactId: providerResponse.InitialContactId || null
+        },
+        attributes
+      };
+      awsContactIndex.set(providerResponse.ContactId, callSid);
+      console.log(`📞 Amazon Connect contact started: ${providerResponse.ContactId} (call ${callSid})`.green);
+    } else if (isVonageProvider) {
+      callSid = `vonage-${uuidv4()}`;
+      const adapters = await ensureVonageAdapters();
+      const answerUrl = `${publicHttpBase}/vonage/answer?call_sid=${callSid}`;
+      const eventUrl = `${publicHttpBase}/vonage/event`;
+
+      providerResponse = await adapters.voice.createOutboundCall({
+        to: number,
+        callSid,
+        answerUrl,
+        eventUrl,
+      });
+
+      providerContactId = providerResponse.uuid || providerResponse?.data?.uuid || null;
+      providerStatus = providerResponse.status || 'started';
+      providerMetadata = {
+        vonage: {
+          uuid: providerResponse.uuid || null,
+          conversation_uuid: providerResponse.conversation_uuid || providerResponse.conversationUuid || null,
+          answer_url: answerUrl,
+          event_url: eventUrl,
+        },
+      };
+
+      if (providerContactId) {
+        vonageCallIndex.set(providerContactId, callSid);
+      }
+      if (providerResponse.conversation_uuid) {
+        vonageCallIndex.set(providerResponse.conversation_uuid, callSid);
+      }
+
+      console.log(`📞 Vonage outbound call started: ${providerContactId || 'unknown'} (call ${callSid})`.green);
+    } else {
+      const client = require('twilio')(accountSid, authToken);
+      providerResponse = await client.calls.create({
+        url: `${publicHttpBase}/incoming`,
+        to: number,
+        from: twilioFromNumber,
+        statusCallback: `${publicHttpBase}/webhook/call-status`,
+        statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed', 'busy', 'no-answer', 'canceled', 'failed'],
+        statusCallbackMethod: 'POST'
+      });
+      callSid = providerResponse.sid;
+      providerContactId = providerResponse.sid;
+      providerStatus = providerResponse.status;
+      providerMetadata = {
+        twilio: {
+          statusCallback: `${publicHttpBase}/webhook/call-status`
+        }
+      };
+      console.log(`📞 Twilio call created: ${callSid} to ${number}`.green);
+    }
+
+    callConfigurations.set(callSid, callConfig);
+    callFunctionSystems.set(callSid, functionSystem);
+
     try {
       const businessContextRecord = {
         ...functionSystem.context,
@@ -695,47 +1157,66 @@ app.post('/outbound-call', async (req, res) => {
       };
 
       await db.createCall({
-        call_sid: call.sid,
+        call_sid: callSid,
         phone_number: number,
         prompt: selectedPrompt,
         first_message: selectedFirstMessage,
-        user_chat_id: user_chat_id,
+        user_chat_id,
         business_context: JSON.stringify(businessContextRecord),
-        generated_functions: JSON.stringify(functionSystem.functions.map(f => f.function.name))
+        generated_functions: JSON.stringify(functionSystem.functions.map((f) => f.function.name)),
+        provider: currentProvider,
+        provider_contact_id: providerContactId,
+        provider_metadata: {
+          ...providerMetadata,
+          promptSource,
+          voice_model: voice_model || null
+        }
       });
 
-      // Create initial webhook notification
       if (user_chat_id) {
-        await db.createEnhancedWebhookNotification(call.sid, 'call_initiated', user_chat_id);
+        await db.createEnhancedWebhookNotification(callSid, 'call_initiated', user_chat_id);
       }
 
-      console.log(`📞 Enhanced adaptive call created: ${call.sid} to ${number}`.green);
-      console.log(`🎯 Business context: ${functionSystem.context.industry} - ${functionSystem.context.businessType}`.cyan);
+      console.log(
+        `🎯 Business context: ${functionSystem.context.industry} - ${functionSystem.context.businessType}`.cyan
+      );
       console.log(`🧾 Prompt source: ${promptSource}${businessProfile ? ` (${businessProfile.displayName})` : ''}`.cyan);
       if (composition?.metadata) {
         console.log(`🧬 Persona metadata: ${JSON.stringify(composition.metadata)}`.gray);
       }
-      
     } catch (dbError) {
       console.error('Database error:', dbError);
     }
 
+    if (isAwsProvider) {
+      await initializeAwsCallSession({
+        callSid,
+        contactId: providerContactId,
+        callConfig,
+        functionSystem,
+        firstMessage: selectedFirstMessage,
+        voiceModel: voice_model || null,
+        phoneNumber: number
+      });
+    }
+
     res.json({
       success: true,
-      call_sid: call.sid,
+      call_sid: callSid,
       to: number,
-      status: call.status,
+      status: providerStatus,
+      provider: currentProvider,
+      provider_contact_id: providerContactId,
       business_context: functionSystem.context,
       business_id: businessProfile ? businessProfile.id : null,
       business_display_name: businessProfile ? businessProfile.displayName : null,
       prompt_source: promptSource,
       generated_functions: functionSystem.functions.length,
-      function_types: functionSystem.functions.map(f => f.function.name),
+      function_types: functionSystem.functions.map((f) => f.function.name),
       enhanced_webhooks: true,
       persona: composition ? composition.metadata : null,
       voice_model: voice_model || null
     });
-
   } catch (error) {
     console.error('Error creating enhanced adaptive outbound call:', error);
     res.status(500).json({
@@ -745,9 +1226,201 @@ app.post('/outbound-call', async (req, res) => {
   }
 });
 
+app.get('/admin/provider', requireAdminAuth, async (req, res) => {
+  try {
+    const storedProvider = db && typeof db.getSystemSetting === 'function'
+      ? await db.getSystemSetting('call_provider')
+      : currentProvider;
+
+    const twilioReady = Boolean(twilioAccountSid && twilioAuthToken && twilioFromNumber);
+    const vonageReady = Boolean(
+      vonageConfig?.apiKey &&
+      vonageConfig?.apiSecret &&
+      vonageConfig?.applicationId &&
+      vonageConfig?.privateKey &&
+      (vonageAdapters?.voice || vonageConfig?.voice?.fromNumber)
+    );
+
+    res.json({
+      provider: currentProvider,
+      stored_provider: storedProvider || currentProvider,
+      is_aws: isAwsProvider,
+      is_vonage: currentProvider === 'vonage',
+      supported_providers: SUPPORTED_CALL_PROVIDERS,
+      aws_ready: !!awsAdapters,
+      twilio_ready: twilioReady,
+      vonage_ready: vonageReady
+    });
+  } catch (error) {
+    console.error('Failed to load provider status:', error);
+    res.status(500).json({ error: 'Failed to load provider status', details: error.message });
+  }
+});
+
+app.post('/admin/provider', requireAdminAuth, async (req, res) => {
+  const requestProvider = (req.body?.provider || req.query?.provider || '').toString().toLowerCase();
+
+  if (!SUPPORTED_CALL_PROVIDERS.includes(requestProvider)) {
+    return res.status(400).json({
+      error: 'Unsupported provider',
+      supported_providers: SUPPORTED_CALL_PROVIDERS
+    });
+  }
+
+  try {
+    const result = await applyProvider(requestProvider, { persist: true });
+    res.json({
+      success: true,
+      provider: currentProvider,
+      changed: result.changed,
+      is_aws: isAwsProvider,
+      is_vonage: currentProvider === 'vonage',
+      vonage_ready: currentProvider === 'vonage' ? !!vonageAdapters : false
+    });
+  } catch (error) {
+    console.error('Failed to update call provider:', error);
+    res.status(500).json({ error: 'Failed to update provider', details: error.message });
+  }
+});
+
+app.all('/vonage/answer', (req, res) => {
+  if (currentProvider !== 'vonage') {
+    res.status(404).json({ error: 'Vonage provider not active' });
+    return;
+  }
+
+  const callSid = req.query?.call_sid || req.body?.call_sid;
+  if (!callSid) {
+    res.status(400).json({ error: 'Missing call_sid parameter' });
+    return;
+  }
+
+  const ncco = [
+    {
+      action: 'connect',
+      endpoint: [
+        {
+          type: 'websocket',
+          uri: `${publicWsBase}/connection`,
+          contentType: 'audio/l16;rate=16000',
+          headers: {
+            call_sid: callSid,
+          },
+        },
+      ],
+    },
+  ];
+
+  res.json(ncco);
+});
+
+app.post('/vonage/event', async (req, res) => {
+  if (currentProvider !== 'vonage') {
+    res.status(404).json({ error: 'Vonage provider not active' });
+    return;
+  }
+
+  try {
+    const event = req.body || {};
+    const { uuid, conversation_uuid: conversationUuid, status } = event;
+    const callSid = event.call_sid || vonageCallIndex.get(uuid);
+
+    if (!callSid) {
+      console.warn('Vonage event received for unknown call', event);
+      res.json({ received: true, ignored: true });
+      return;
+    }
+
+    const normalizedStatusRaw = (status || '').toLowerCase();
+    let normalizedStatus = null;
+    let notificationType = null;
+
+    switch (normalizedStatusRaw) {
+      case 'started':
+      case 'initiated':
+      case 'ringing':
+        normalizedStatus = 'ringing';
+        notificationType = 'call_ringing';
+        break;
+      case 'answered':
+        normalizedStatus = 'in-progress';
+        notificationType = 'call_answered';
+        break;
+      case 'completed':
+      case 'hangup':
+      case 'finished':
+        normalizedStatus = 'completed';
+        notificationType = 'call_completed';
+        break;
+      case 'busy':
+        normalizedStatus = 'busy';
+        notificationType = 'call_busy';
+        break;
+      case 'failed':
+      case 'cancelled':
+      case 'canceled':
+        normalizedStatus = 'failed';
+        notificationType = 'call_failed';
+        break;
+      case 'timeout':
+      case 'unanswered':
+        normalizedStatus = 'no-answer';
+        notificationType = 'call_no_answer';
+        break;
+      default:
+        normalizedStatus = normalizedStatusRaw || 'unknown';
+        notificationType = `call_${normalizedStatus}`;
+    }
+
+    await db.updateCallStatus(callSid, normalizedStatus, {
+      provider: currentProvider,
+      provider_contact_id: uuid,
+      provider_metadata: {
+        vonage_event: event,
+      },
+    });
+
+    const callRecord = await db.getCall(callSid);
+    if (callRecord?.user_chat_id && notificationType) {
+      await db.createEnhancedWebhookNotification(callSid, notificationType, callRecord.user_chat_id);
+    }
+
+    if (['completed', 'no-answer', 'failed', 'busy'].includes(normalizedStatus)) {
+      vonageCallIndex.delete(uuid);
+      if (event.conversation_uuid) {
+        vonageCallIndex.delete(event.conversation_uuid);
+      }
+      if (activeCalls.has(callSid)) {
+        const session = activeCalls.get(callSid);
+        const startTime = session?.startTime || (callRecord?.started_at ? new Date(callRecord.started_at) : new Date());
+        await handleCallEnd(callSid, startTime);
+        activeCalls.delete(callSid);
+      }
+      callConfigurations.delete(callSid);
+      callFunctionSystems.delete(callSid);
+    }
+
+    await db.logServiceHealth('vonage_voice', 'event_received', {
+      call_sid: callSid,
+      status: normalizedStatus,
+      uuid,
+      conversation_uuid: conversationUuid,
+    });
+
+    res.json({ received: true });
+  } catch (error) {
+    console.error('Error processing Vonage event:', error);
+    res.status(500).json({ error: 'Failed to process Vonage event', details: error.message });
+  }
+});
+
 // Enhanced webhook endpoint for call status updates
 
 app.post('/webhook/call-status', async (req, res) => {
+  if (currentProvider !== 'twilio') {
+    res.status(404).json({ error: 'Twilio call status webhook disabled for current provider' });
+    return;
+  }
   try {
     const { 
       CallSid, 
@@ -1294,6 +1967,12 @@ app.get('/health', async (req, res) => {
       status: 'healthy', 
       timestamp: new Date().toISOString(),
       enhanced_features: true,
+      call_provider: {
+        active: currentProvider,
+        is_aws: isAwsProvider,
+        is_vonage: currentProvider === 'vonage',
+        supported: SUPPORTED_CALL_PROVIDERS
+      },
       services: {
         database: {
           connected: true,
@@ -1799,8 +2478,143 @@ app.post('/webhook/sms', async (req, res) => {
         res.status(200).send('OK');
     } catch (error) {
         console.error('❌ SMS webhook error:', error);
-        res.status(500).send('Error');
+    res.status(500).send('Error');
+  }
+});
+
+app.post('/aws/transcripts', async (req, res) => {
+  if (!isAwsProvider) {
+    return res.status(404).json({ error: 'AWS transcription endpoint disabled for current provider' });
+  }
+
+  try {
+    const { callSid, contactId, transcript, isPartial } = req.body || {};
+    const resolvedCallSid = callSid || (contactId ? awsContactIndex.get(contactId) : undefined);
+
+    if (!resolvedCallSid) {
+      return res.status(404).json({ error: 'Unknown call session for transcript payload' });
     }
+
+    const session = awsCallSessions.get(resolvedCallSid);
+    if (!session) {
+      return res.status(404).json({ error: 'Call session not initialized' });
+    }
+
+    if (!transcript) {
+      return res.status(200).json({ received: true, ignored: true });
+    }
+
+    if (isPartial) {
+      session.lastPartial = transcript;
+      return res.json({ received: true, partial: true });
+    }
+
+    console.log(`👤 (AWS) Customer: ${transcript}`.yellow);
+
+    try {
+      await db.addTranscript({
+        call_sid: resolvedCallSid,
+        speaker: 'user',
+        message: transcript,
+        interaction_count: session.interactionCount
+      });
+
+      await db.updateCallState(resolvedCallSid, 'user_spoke', {
+        message: transcript,
+        interaction_count: session.interactionCount,
+        contact_id: session.contactId
+      });
+    } catch (dbError) {
+      console.error('Database error adding AWS user transcript:', dbError);
+    }
+
+    session.gptService.completion(transcript, session.interactionCount);
+    session.interactionCount += 1;
+
+    res.json({ received: true });
+  } catch (error) {
+    console.error('Error processing AWS transcript payload:', error);
+    res.status(500).json({ error: 'Failed to process transcript' });
+  }
+});
+
+app.post('/aws/contact-events', async (req, res) => {
+  if (!isAwsProvider) {
+    return res.status(404).json({ error: 'AWS contact events endpoint disabled for current provider' });
+  }
+
+  try {
+    const payload = req.body || {};
+    const contactId = payload.contactId || payload.ContactId || payload.detail?.contactId || payload.detail?.ContactId;
+    const resolvedCallSid = payload.callSid || (contactId ? awsContactIndex.get(contactId) : undefined);
+    const eventTypeRaw = payload.eventType || payload.EventType || payload.detail?.eventType || payload.detail?.ContactStatus || '';
+    const eventType = (eventTypeRaw || '').toLowerCase();
+
+    if (!contactId) {
+      return res.status(400).json({ error: 'Missing contactId in contact event payload' });
+    }
+
+    if (resolvedCallSid) {
+      await db.updateCallState(resolvedCallSid, 'connect_event', {
+        event_type: eventType,
+        payload: JSON.stringify(payload)
+      });
+    }
+
+    let normalizedStatus = null;
+    let notificationType = null;
+
+    switch (eventType) {
+      case 'queued':
+      case 'queue':
+        normalizedStatus = 'initiated';
+        notificationType = 'call_initiated';
+        break;
+      case 'connected':
+      case 'customer_connected':
+      case 'agent_connected':
+      case 'connected_to_customer':
+        normalizedStatus = 'in-progress';
+        notificationType = 'call_answered';
+        break;
+      case 'disconnected':
+      case 'completed':
+      case 'contact_disconnected':
+        normalizedStatus = 'completed';
+        notificationType = 'call_completed';
+        break;
+      default:
+        break;
+    }
+
+    if (resolvedCallSid && normalizedStatus) {
+      await db.updateCallStatus(resolvedCallSid, normalizedStatus, {
+        provider: currentProvider,
+        provider_contact_id: contactId
+      });
+
+      const callRecord = await db.getCall(resolvedCallSid);
+      if (callRecord?.user_chat_id && notificationType) {
+        await db.createEnhancedWebhookNotification(resolvedCallSid, notificationType, callRecord.user_chat_id);
+      }
+
+      if (normalizedStatus === 'completed') {
+        const session = awsCallSessions.get(resolvedCallSid);
+        const startTime = session?.startTime || new Date();
+        await handleCallEnd(resolvedCallSid, startTime);
+        awsCallSessions.delete(resolvedCallSid);
+        activeCalls.delete(resolvedCallSid);
+        awsContactIndex.delete(contactId);
+        callConfigurations.delete(resolvedCallSid);
+        callFunctionSystems.delete(resolvedCallSid);
+      }
+    }
+
+    res.json({ received: true, call_sid: resolvedCallSid || null, contact_id: contactId });
+  } catch (error) {
+    console.error('Error processing AWS contact event:', error);
+    res.status(500).json({ error: 'Failed to process contact event' });
+  }
 });
 
 app.post('/webhook/sms-status', async (req, res) => {
@@ -3301,7 +4115,9 @@ app.get('/api/sms/health', async (req, res) => {
             status: 'healthy',
             services: {
                 database: { status: 'unknown' },
-                twilio: { status: 'unknown' },
+                twilio: { status: currentProvider === 'twilio' ? 'unknown' : 'disabled' },
+                pinpoint: { status: currentProvider === 'aws' ? 'unknown' : 'disabled' },
+                vonage: { status: currentProvider === 'vonage' ? 'unknown' : 'disabled' },
                 sms_service: { status: 'unknown' }
             },
             statistics: {
@@ -3363,17 +4179,38 @@ app.get('/api/sms/health', async (req, res) => {
         }
 
         // Check Twilio connectivity (basic check)
-        try {
-            if (twilioAccountSid && twilioAuthToken) {
-                health.services.twilio.status = 'configured';
-                health.services.twilio.account_sid = `${twilioAccountSid.substring(0, 8)}...`;
+        if (currentProvider === 'twilio') {
+            try {
+                if (twilioAccountSid && twilioAuthToken) {
+                    health.services.twilio.status = 'configured';
+                    health.services.twilio.account_sid = `${twilioAccountSid.substring(0, 8)}...`;
+                } else {
+                    health.services.twilio.status = 'not_configured';
+                    health.status = 'degraded';
+                }
+            } catch (twilioError) {
+                health.services.twilio.status = 'error';
+                health.services.twilio.error = twilioError.message;
+            }
+        }
+
+        if (currentProvider === 'aws') {
+            if (awsAdapters?.sms) {
+                health.services.pinpoint.status = 'configured';
+                health.services.pinpoint.application_id = awsAdapters.sms.config.pinpoint.applicationId;
+                health.services.pinpoint.region = awsAdapters.sms.config.pinpoint.region;
             } else {
-                health.services.twilio.status = 'not_configured';
+                health.services.pinpoint.status = 'not_configured';
                 health.status = 'degraded';
             }
-        } catch (twilioError) {
-            health.services.twilio.status = 'error';
-            health.services.twilio.error = twilioError.message;
+        } else if (currentProvider === 'vonage') {
+            if (vonageAdapters?.sms) {
+                health.services.vonage.status = 'configured';
+                health.services.vonage.from_number = vonageAdapters.sms.fromNumber || vonageConfig?.sms?.fromNumber;
+            } else {
+                health.services.vonage.status = 'not_configured';
+                health.status = 'degraded';
+            }
         }
 
         res.json(health);
