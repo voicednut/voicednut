@@ -1,17 +1,21 @@
 const { getUser, getUserList, addUser, promoteUser, removeUser, isAdmin } = require('../db/db');
+const { guardAgainstCommandInterrupt, OperationCancelledError } = require('../utils/sessionState');
 
 // ------------------------- Add User Flow -------------------------
 async function addUserFlow(conversation, ctx) {
   try {
     await ctx.reply('🆔 Enter Telegram ID:');
     const idMsg = await conversation.wait();
-
-    if (!idMsg?.message?.text) {
+    const idText = idMsg?.message?.text?.trim();
+    if (idText) {
+      await guardAgainstCommandInterrupt(ctx, idText);
+    }
+    if (!idText) {
       await ctx.reply('❌ Please send a valid text message.');
       return;
     }
 
-    const id = parseInt(idMsg.message.text, 10);
+    const id = parseInt(idText, 10);
     if (Number.isNaN(id)) {
       await ctx.reply('❌ Invalid Telegram ID. Please send a number.');
       return;
@@ -19,13 +23,16 @@ async function addUserFlow(conversation, ctx) {
 
     await ctx.reply('🔠 Enter username:');
     const usernameMsg = await conversation.wait();
-
-    if (!usernameMsg?.message?.text) {
+    const usernameText = usernameMsg?.message?.text?.trim();
+    if (usernameText) {
+      await guardAgainstCommandInterrupt(ctx, usernameText);
+    }
+    if (!usernameText) {
       await ctx.reply('❌ Please send a valid username.');
       return;
     }
 
-    const username = usernameMsg.message.text.trim();
+    const username = usernameText;
     if (!username) {
       await ctx.reply('❌ Username cannot be empty.');
       return;
@@ -44,6 +51,10 @@ async function addUserFlow(conversation, ctx) {
 
     await ctx.reply(`✅ @${username} (${id}) added as USER.`);
   } catch (error) {
+    if (error instanceof OperationCancelledError) {
+      console.log('Add user flow cancelled');
+      return;
+    }
     console.error('Add user flow error:', error);
     await ctx.reply('❌ An error occurred while adding user. Please try again.');
   }
@@ -75,13 +86,16 @@ async function promoteFlow(conversation, ctx) {
   try {
     await ctx.reply('🆔 Enter Telegram ID to promote:');
     const idMsg = await conversation.wait();
-
-    if (!idMsg?.message?.text) {
+    const idText = idMsg?.message?.text?.trim();
+    if (idText) {
+      await guardAgainstCommandInterrupt(ctx, idText);
+    }
+    if (!idText) {
       await ctx.reply('❌ Please send a valid Telegram ID.');
       return;
     }
 
-    const id = parseInt(idMsg.message.text, 10);
+    const id = parseInt(idText, 10);
     if (Number.isNaN(id)) {
       await ctx.reply('❌ Invalid Telegram ID. Please send a number.');
       return;
@@ -100,6 +114,10 @@ async function promoteFlow(conversation, ctx) {
 
     await ctx.reply(`✅ User ${id} promoted to ADMIN.`);
   } catch (error) {
+    if (error instanceof OperationCancelledError) {
+      console.log('Promote flow cancelled');
+      return;
+    }
     console.error('Promote flow error:', error);
     await ctx.reply('❌ An error occurred while promoting user. Please try again.');
   }
@@ -131,13 +149,16 @@ async function removeUserFlow(conversation, ctx) {
   try {
     await ctx.reply('🆔 Enter Telegram ID to remove:');
     const idMsg = await conversation.wait();
-
-    if (!idMsg?.message?.text) {
+    const idText = idMsg?.message?.text?.trim();
+    if (idText) {
+      await guardAgainstCommandInterrupt(ctx, idText);
+    }
+    if (!idText) {
       await ctx.reply('❌ Please send a valid Telegram ID.');
       return;
     }
 
-    const id = parseInt(idMsg.message.text, 10);
+    const id = parseInt(idText, 10);
     if (Number.isNaN(id)) {
       await ctx.reply('❌ Invalid Telegram ID. Please send a number.');
       return;
@@ -156,6 +177,10 @@ async function removeUserFlow(conversation, ctx) {
 
     await ctx.reply(`✅ User ${id} removed.`);
   } catch (error) {
+    if (error instanceof OperationCancelledError) {
+      console.log('Remove user flow cancelled');
+      return;
+    }
     console.error('Remove user flow error:', error);
     await ctx.reply('❌ An error occurred while removing user. Please try again.');
   }

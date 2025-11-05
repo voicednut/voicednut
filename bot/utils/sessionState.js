@@ -204,6 +204,22 @@ async function safeReset(ctx, reason = 'reset', options = {}) {
   }
 }
 
+function isSlashCommandInput(text) {
+  if (typeof text !== 'string') {
+    return false;
+  }
+  const trimmed = text.trim();
+  return trimmed.startsWith('/') && trimmed.length > 1;
+}
+
+async function guardAgainstCommandInterrupt(ctx, text, reason = 'command_interrupt') {
+  if (!isSlashCommandInput(text)) {
+    return;
+  }
+  await safeReset(ctx, reason, { notify: false });
+  throw new OperationCancelledError('Conversation interrupted by slash command');
+}
+
 module.exports = {
   initialSessionState,
   startOperation,
@@ -216,6 +232,8 @@ module.exports = {
   ensureOperationActive,
   ensureFlow,
   safeReset,
+  guardAgainstCommandInterrupt,
+  isSlashCommandInput,
   FlowContext,
   OperationCancelledError
 };

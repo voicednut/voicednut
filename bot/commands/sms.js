@@ -5,7 +5,8 @@ const {
     startOperation,
     ensureOperationActive,
     registerAbortController,
-    OperationCancelledError
+    OperationCancelledError,
+    guardAgainstCommandInterrupt
 } = require('../utils/sessionState');
 const {
     getBusinessOptions,
@@ -36,6 +37,10 @@ async function smsFlow(conversation, ctx) {
     const waitForMessage = async () => {
         const update = await conversation.wait();
         ensureActive();
+        const text = update?.message?.text?.trim();
+        if (text) {
+            await guardAgainstCommandInterrupt(ctx, text);
+        }
         return update;
     };
     const askWithGuard = async (...params) => {
@@ -415,6 +420,10 @@ async function bulkSmsFlow(conversation, ctx) {
     const waitForMessage = async () => {
         const update = await conversation.wait();
         ensureActive();
+        const text = update?.message?.text?.trim();
+        if (text) {
+            await guardAgainstCommandInterrupt(ctx, text);
+        }
         return update;
     };
 
@@ -532,6 +541,10 @@ async function scheduleSmsFlow(conversation, ctx) {
     const waitForMessage = async () => {
         const update = await conversation.wait();
         ensureActive();
+        const text = update?.message?.text?.trim();
+        if (text) {
+            await guardAgainstCommandInterrupt(ctx, text);
+        }
         return update;
     };
     const guardedPost = async (url, data, options = {}) => {
