@@ -261,7 +261,15 @@ class EnhancedWebhookService {
 
       const fullMessage = `${emoji} ${message}`;
       
-      await this.sendTelegramMessage(telegram_chat_id, fullMessage);
+      const isTerminal = ['completed', 'failed', 'no-answer', 'busy', 'canceled'].includes(normalizedStatus);
+      const followUpKeyboard = isTerminal ? this.buildCallFollowUpKeyboard(call_sid, normalizedStatus) : null;
+
+      let messageText = fullMessage;
+      if (followUpKeyboard) {
+        messageText += '\n\n⚡ Quick actions:';
+      }
+
+      await this.sendTelegramMessage(telegram_chat_id, messageText, false, followUpKeyboard);
       console.log(`✅ Sent enhanced status update: ${normalizedStatus} for call ${call_sid}`.green);
       
       // Log notification metric
@@ -475,7 +483,7 @@ class EnhancedWebhookService {
   }
 
   // Enhanced Telegram message sending with markdown support
-  async sendTelegramMessage(chatId, message, enableMarkdown = false) {
+  async sendTelegramMessage(chatId, message, enableMarkdown = false, replyMarkup = null) {
     const url = `https://api.telegram.org/bot${this.telegramBotToken}/sendMessage`;
     
     const payload = {
@@ -486,6 +494,10 @@ class EnhancedWebhookService {
 
     if (enableMarkdown) {
       payload.parse_mode = 'Markdown';
+    }
+
+    if (replyMarkup) {
+      payload.reply_markup = replyMarkup;
     }
 
     const response = await axios.post(url, payload, {
@@ -516,7 +528,7 @@ class EnhancedWebhookService {
 🔗 *From:* ${webhookData.From || 'N/A'}
 🎯 *To:* ${webhookData.To || 'N/A'}`;
 
-      await this.sendTelegramMessage(telegram_chat_id, debugMessage, true);
+        await this.sendTelegramMessage(telegram_chat_id, debugMessage, true);
       return true;
     } catch (error) {
       console.error('Failed to send debug info:', error);
@@ -537,6 +549,32 @@ class EnhancedWebhookService {
       'initiated': '📞'
     };
     return statusEmojis[status] || '📱';
+  }
+
+  buildCallFollowUpKeyboard(callSid, status) {
+    if (!callSid) return null;
+
+    const sid = String(callSid);
+    const base = `FOLLOWUP_CALL:${sid}:`;
+
+    const rows = [
+      [
+        { text: '📝 Send recap', callback_data: `${base}recap` },
+        { text: '⏰ Schedule follow-up', callback_data: `${base}schedule` }
+      ],
+      [
+        { text: '👤 Reassign to agent', callback_data: `${base}reassign` }
+      ]
+    ];
+
+    // Offer transcript view only when call actually connected/completed
+    if (status === 'completed' || status === 'answered') {
+      rows[1].unshift({ text: '📋 View transcript', callback_data: `${base}transcript` });
+    }
+
+    return {
+      inline_keyboard: rows
+    };
   }
 
   cleanMessageForTelegram(message) {

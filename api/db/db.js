@@ -26,23 +26,6 @@ class EnhancedDatabase {
         });
     }
 
-    async close() {
-        if (!this.db) {
-            return;
-        }
-
-        await new Promise((resolve, reject) => {
-            this.db.close((err) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    this.db = null;
-                    resolve();
-                }
-            });
-        });
-    }
-
     async execute(sql, context, options = {}) {
         const { ignoreErrors = [], successMessage } = options;
         await new Promise((resolve, reject) => {
@@ -111,6 +94,32 @@ class EnhancedDatabase {
             {
                 name: 'idx_sms_templates_name',
                 sql: 'CREATE INDEX IF NOT EXISTS idx_sms_templates_name ON sms_templates(name)'
+            },
+            {
+                name: 'create_persona_profiles_table',
+                sql: `CREATE TABLE IF NOT EXISTS persona_profiles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    slug TEXT UNIQUE NOT NULL,
+                    label TEXT NOT NULL,
+                    description TEXT,
+                    purposes TEXT,
+                    default_purpose TEXT,
+                    default_emotion TEXT,
+                    default_urgency TEXT,
+                    default_technical_level TEXT,
+                    call_template_id INTEGER,
+                    sms_template_name TEXT,
+                    metadata TEXT,
+                    created_by TEXT,
+                    updated_by TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(call_template_id) REFERENCES call_templates(id)
+                )`
+            },
+            {
+                name: 'idx_persona_profiles_slug',
+                sql: 'CREATE UNIQUE INDEX IF NOT EXISTS idx_persona_profiles_slug ON persona_profiles(slug)'
             }
         ];
 
@@ -585,6 +594,208 @@ class EnhancedDatabase {
             this.db.run(
                 `DELETE FROM call_templates WHERE id = ?`,
                 [id],
+                function (err) {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve({ changes: this.changes });
+                    }
+                }
+            );
+        });
+    }
+
+    formatPersonaProfile(row) {
+        if (!row) return null;
+
+        const safeParse = (value, label) => {
+            if (!value) return null;
+            try {
+                return JSON.parse(value);
+            } catch (error) {
+                console.warn(`Failed to parse ${label} for persona profile ${row.slug}:`, error);
+                return null;
+            }
+        };
+
+        return {
+            id: row.id,
+            slug: row.slug,
+            label: row.label,
+            description: row.description,
+            purposes: safeParse(row.purposes, 'purposes'),
+            default_purpose: row.default_purpose,
+            default_emotion: row.default_emotion,
+            default_urgency: row.default_urgency,
+            default_technical_level: row.default_technical_level,
+            call_template_id: row.call_template_id,
+            sms_template_name: row.sms_template_name,
+            metadata: safeParse(row.metadata, 'metadata'),
+            created_by: row.created_by,
+            updated_by: row.updated_by,
+            created_at: row.created_at,
+            updated_at: row.updated_at
+        };
+    }
+
+    async listPersonaProfiles() {
+        return new Promise((resolve, reject) => {
+            this.db.all(
+                `SELECT * FROM persona_profiles ORDER BY label ASC`,
+                [],
+                (err, rows) => {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve(rows.map((row) => this.formatPersonaProfile(row)));
+                    }
+                }
+            );
+        });
+    }
+
+    async getPersonaProfileBySlug(slug) {
+        return new Promise((resolve, reject) => {
+            this.db.get(
+                `SELECT * FROM persona_profiles WHERE slug = ?`,
+                [slug],
+                (err, row) => {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve(this.formatPersonaProfile(row));
+                    }
+                }
+            );
+        });
+    }
+
+    async createPersonaProfile(persona) {
+        const {
+            slug,
+            label,
+            description,
+            purposes,
+            default_purpose,
+            default_emotion,
+            default_urgency,
+            default_technical_level,
+            call_template_id,
+            sms_template_name,
+            metadata,
+            created_by,
+            updated_by
+        } = persona;
+
+        const purposesJson = purposes ? JSON.stringify(purposes) : null;
+        const metadataJson = metadata ? JSON.stringify(metadata) : null;
+
+        return new Promise((resolve, reject) => {
+            const sql = `
+                INSERT INTO persona_profiles (
+                    slug,
+                    label,
+                    description,
+                    purposes,
+                    default_purpose,
+                    default_emotion,
+                    default_urgency,
+                    default_technical_level,
+                    call_template_id,
+                    sms_template_name,
+                    metadata,
+                    created_by,
+                    updated_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `;
+
+            this.db.run(
+                sql,
+                [
+                    slug,
+                    label,
+                    description || null,
+                    purposesJson,
+                    default_purpose || null,
+                    default_emotion || null,
+                    default_urgency || null,
+                    default_technical_level || null,
+                    call_template_id || null,
+                    sms_template_name || null,
+                    metadataJson,
+                    created_by || null,
+                    updated_by || created_by || null
+                ],
+                function (err) {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve({ id: this.lastID });
+                    }
+                }
+            );
+        });
+    }
+
+    async updatePersonaProfile(slug, updates) {
+        const fields = [];
+        const values = [];
+
+        const directFields = [
+            'label',
+            'description',
+            'default_purpose',
+            'default_emotion',
+            'default_urgency',
+            'default_technical_level',
+            'call_template_id',
+            'sms_template_name',
+            'created_by',
+            'updated_by'
+        ];
+
+        for (const field of directFields) {
+            if (updates[field] !== undefined) {
+                fields.push(`${field} = ?`);
+                values.push(updates[field]);
+            }
+        }
+
+        if (updates.purposes !== undefined) {
+            fields.push('purposes = ?');
+            values.push(updates.purposes ? JSON.stringify(updates.purposes) : null);
+        }
+
+        if (updates.metadata !== undefined) {
+            fields.push('metadata = ?');
+            values.push(updates.metadata ? JSON.stringify(updates.metadata) : null);
+        }
+
+        if (fields.length === 0) {
+            return { changes: 0 };
+        }
+
+        fields.push('updated_at = CURRENT_TIMESTAMP');
+        values.push(slug);
+
+        return new Promise((resolve, reject) => {
+            const sql = `UPDATE persona_profiles SET ${fields.join(', ')} WHERE slug = ?`;
+
+            this.db.run(sql, values, function (err) {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve({ changes: this.changes });
+                }
+            });
+        });
+    }
+
+    async deletePersonaProfile(slug) {
+        return new Promise((resolve, reject) => {
+            this.db.run(
+                `DELETE FROM persona_profiles WHERE slug = ?`,
+                [slug],
                 function (err) {
                     if (err) {
                         reject(err);
@@ -1695,6 +1906,7 @@ class EnhancedDatabase {
                        } else {
                            console.log('✅ Enhanced database connection closed');
                        }
+                       this.db = null;
                        resolve();
                    });
                }).catch(() => {
@@ -1705,6 +1917,7 @@ class EnhancedDatabase {
                        } else {
                            console.log('✅ Enhanced database connection closed');
                        }
+                       this.db = null;
                        resolve();
                    });
                });

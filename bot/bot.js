@@ -124,6 +124,7 @@ const { getUser, isAdmin, expireInactiveUsers } = require('./db/db');
 const { callFlow, registerCallCommand } = require('./commands/call');
 const { smsFlow, bulkSmsFlow, scheduleSmsFlow, registerSmsCommands } = require('./commands/sms');
 const { templatesFlow, registerTemplatesCommand } = require('./commands/templates');
+const { personaFlow, registerPersonaCommand } = require('./commands/persona');
 const {
     addUserFlow,
     registerAddUserCommand,
@@ -143,6 +144,7 @@ bot.use(wrapConversation(scheduleSmsFlow, "schedule-sms-conversation"));
 bot.use(wrapConversation(smsFlow, "sms-conversation"));
 bot.use(wrapConversation(bulkSmsFlow, "bulk-sms-conversation"));
 bot.use(wrapConversation(templatesFlow, "templates-conversation"));
+bot.use(wrapConversation(personaFlow, "persona-conversation"));
 
 // Register command handlers
 registerCallCommand(bot);
@@ -152,6 +154,7 @@ registerRemoveUserCommand(bot);
 registerSmsCommands(bot);
 registerTemplatesCommand(bot);
 registerUserListCommand(bot);
+registerPersonaCommand(bot);
 
 
 // Register non-conversation commands
@@ -161,6 +164,215 @@ require('./commands/guide')(bot);
 require('./commands/transcript')(bot);
 require('./commands/api')(bot);
 require('./commands/webapp')(bot); // Register WebApp handler
+
+function escapeMarkdown(text = '') {
+    return text.replace(/([_*[\]()~`>#+=|{}.!\\-])/g, '\\$1');
+}
+
+function formatDuration(seconds = 0) {
+    if (!seconds || seconds < 1) return 'N/A';
+    const minutes = Math.floor(seconds / 60);
+    const remaining = seconds % 60;
+    return `${minutes}:${String(remaining).padStart(2, '0')}`;
+}
+
+async function handleCallFollowUp(ctx, callSid, followAction) {
+    if (!callSid) {
+        await ctx.reply('❌ Missing call identifier for follow-up.');
+        return;
+    }
+
+    if (ctx.callbackQuery?.message) {
+        try {
+            await ctx.editMessageReplyMarkup();
+        } catch (error) {
+            console.warn('Unable to clear follow-up keyboard:', error.message);
+        }
+    }
+
+    const action = followAction || 'recap';
+
+    let callData;
+    let transcripts = [];
+
+    try {
+        const response = await axios.get(`${config.apiUrl}/api/calls/${callSid}`, {
+            timeout: 15000
+        });
+
+        callData = response.data?.call || response.data;
+        transcripts = response.data?.transcripts || [];
+    } catch (error) {
+        console.error('Follow-up call fetch error:', error?.message || error);
+        await ctx.reply('❌ Unable to retrieve call details. Please try again later.');
+        return;
+    }
+
+    if (!callData) {
+        await ctx.reply('❌ Call not found. It may have been archived.');
+        return;
+    }
+
+    switch (action) {
+        case 'recap': {
+            const rawSummary = callData.call_summary || 'No recap is available yet for this call.';
+            const summary = rawSummary.length > 1200 ? `${rawSummary.slice(0, 1200)}…` : rawSummary;
+            const status = callData.status || 'unknown';
+            const duration = formatDuration(callData.duration);
+
+            const message =
+                `📝 *Call Recap*\n\n` +
+                `📞 ${escapeMarkdown(callData.phone_number || 'Unknown')}\n` +
+                `📊 Status: ${escapeMarkdown(status)}\n` +
+                `⏱️ Duration: ${escapeMarkdown(duration)}\n\n` +
+                `${escapeMarkdown(summary)}`;
+
+            await ctx.reply(message, { parse_mode: 'Markdown' });
+            break;
+        }
+
+        case 'schedule': {
+            if (!callData.phone_number) {
+                await ctx.reply('❌ Cannot schedule follow-up: original phone number missing.');
+                return;
+            }
+            ctx.session.meta = ctx.session.meta || {};
+            ctx.session.meta.prefill = {
+                phoneNumber: callData.phone_number,
+                followUp: 'sms',
+                callSid
+            };
+            await ctx.reply('⏰ Starting follow-up SMS scheduling flow...');
+            try {
+                await ctx.conversation.enter('schedule-sms-conversation');
+            } catch (error) {
+                console.error('Follow-up schedule flow error:', error);
+                await ctx.reply('❌ Unable to start scheduling flow. You can use /schedulesms manually.');
+            }
+            break;
+        }
+
+        case 'reassign': {
+            if (!callData.phone_number) {
+                await ctx.reply('❌ Cannot reassign: original phone number missing.');
+                return;
+            }
+            ctx.session.meta = ctx.session.meta || {};
+            ctx.session.meta.prefill = {
+                phoneNumber: callData.phone_number,
+                followUp: 'call',
+                callSid
+            };
+            await ctx.reply('👤 Reassigning to a new agent. Starting call setup...');
+            try {
+                await ctx.conversation.enter('call-conversation');
+            } catch (error) {
+                console.error('Follow-up call flow error:', error);
+                await ctx.reply('❌ Unable to start call flow. You can use /call to retry manually.');
+            }
+            break;
+        }
+
+        case 'transcript': {
+            if (!transcripts.length) {
+                await ctx.reply('📋 No transcript is available for this call yet.');
+                return;
+            }
+
+            const maxMessages = 6;
+            let transcriptMessage = `📋 *Recent Transcript*\n\n`;
+            transcripts.slice(0, maxMessages).forEach((entry) => {
+                const speaker = entry.speaker === 'user' ? '👤 Customer' : '🤖 AI';
+                const snippet = escapeMarkdown(entry.message.slice(0, 160));
+                transcriptMessage += `${speaker}: ${snippet}${entry.message.length > 160 ? '…' : ''}\n\n`;
+            });
+
+            if (transcripts.length > maxMessages) {
+                transcriptMessage += `_… ${transcripts.length - maxMessages} more messages_\n\n`;
+            }
+
+            transcriptMessage += `Use /transcript ${escapeMarkdown(callSid)} for the full conversation.`;
+
+            await ctx.reply(transcriptMessage, { parse_mode: 'Markdown' });
+            break;
+        }
+
+        default:
+            await ctx.reply('ℹ️ Quick action not recognised or not yet implemented.');
+            break;
+    }
+}
+
+async function handleSmsFollowUp(ctx, phone, followAction) {
+    if (!phone) {
+        await ctx.reply('❌ Missing phone number for follow-up.');
+        return;
+    }
+
+    if (ctx.callbackQuery?.message) {
+        try {
+            await ctx.editMessageReplyMarkup();
+        } catch (error) {
+            console.warn('Unable to clear SMS follow-up keyboard:', error.message);
+        }
+    }
+
+    const normalizedPhone = phone.startsWith('+') ? phone : `+${phone}`;
+    const action = followAction || 'new';
+
+    ctx.session.meta = ctx.session.meta || {};
+
+    switch (action) {
+        case 'new': {
+            ctx.session.meta.prefill = {
+                phoneNumber: normalizedPhone,
+                followUp: 'sms'
+            };
+            await ctx.reply('💬 Continuing the conversation via SMS...');
+            try {
+                await ctx.conversation.enter('sms-conversation');
+            } catch (error) {
+                console.error('Follow-up SMS flow error:', error);
+                await ctx.reply('❌ Unable to start SMS flow. You can use /sms to continue manually.');
+            }
+            break;
+        }
+
+        case 'schedule': {
+            ctx.session.meta.prefill = {
+                phoneNumber: normalizedPhone,
+                followUp: 'sms'
+            };
+            await ctx.reply('⏰ Scheduling a follow-up SMS...');
+            try {
+                await ctx.conversation.enter('schedule-sms-conversation');
+            } catch (error) {
+                console.error('Follow-up schedule SMS flow error:', error);
+                await ctx.reply('❌ Unable to start schedule flow. You can use /schedulesms manually.');
+            }
+            break;
+        }
+
+        case 'call': {
+            ctx.session.meta.prefill = {
+                phoneNumber: normalizedPhone,
+                followUp: 'call'
+            };
+            await ctx.reply('📞 Initiating a follow-up call setup...');
+            try {
+                await ctx.conversation.enter('call-conversation');
+            } catch (error) {
+                console.error('Follow-up call via SMS action error:', error);
+                await ctx.reply('❌ Unable to start call flow. You can use /call to retry manually.');
+            }
+            break;
+        }
+
+        default:
+            await ctx.reply('ℹ️ SMS quick action not recognised.');
+            break;
+    }
+}
 
 
 // Start command handler
@@ -268,6 +480,22 @@ bot.on('callback_query:data', async (ctx) => {
         
         if (adminActions.includes(action) && !isAdminUser) {
             await ctx.reply("❌ This action is for administrators only.");
+            return;
+        }
+
+        if (action.startsWith('FOLLOWUP_CALL:')) {
+            await cancelActiveFlow(ctx, `callback:${action}`);
+            resetSession(ctx);
+            const [, callSid, followAction] = action.split(':');
+            await handleCallFollowUp(ctx, callSid, followAction || 'recap');
+            return;
+        }
+
+        if (action.startsWith('FOLLOWUP_SMS:')) {
+            await cancelActiveFlow(ctx, `callback:${action}`);
+            resetSession(ctx);
+            const [, phone, followAction] = action.split(':');
+            await handleSmsFollowUp(ctx, phone, followAction || 'new');
             return;
         }
 

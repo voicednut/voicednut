@@ -94,15 +94,15 @@ class EnhancedWebhookService {
 
     async processNotification(notification) {
         try {
-            const message = this.generateNotificationMessage(notification);
+            const { text, replyMarkup } = this.generateNotificationMessage(notification);
             
-            if (!message) {
+            if (!text) {
                 console.warn(`⚠️ Could not generate message for notification ${notification.id}`);
                 await this.db.updateEnhancedWebhookNotification(notification.id, 'failed', 'Could not generate message');
                 return;
             }
 
-            const success = await this.sendTelegramMessage(notification.telegram_chat_id, message);
+            const success = await this.sendTelegramMessage(notification.telegram_chat_id, text, replyMarkup);
             
             if (success) {
                 await this.db.updateEnhancedWebhookNotification(notification.id, 'sent', null, success.message_id);
@@ -263,21 +263,61 @@ class EnhancedWebhookService {
         };
 
         const template = templates[notification_type];
+        let text;
         
         if (!template) {
             console.warn(`⚠️ No template found for notification type: ${notification_type}`);
-            return `🔔 *Notification*\n\nType: ${notification_type}\nCall/Message ID: \`${call_sid}\`\nTime: ${new Date().toLocaleString()}`;
+            text = `🔔 *Notification*\n\nType: ${notification_type}\nCall/Message ID: \`${call_sid}\`\nTime: ${new Date().toLocaleString()}`;
+        } else {
+            try {
+                text = template();
+            } catch (error) {
+                console.error(`❌ Error generating message for ${notification_type}:`, error);
+                text = `🔔 *System Notification*\n\nType: ${notification_type}\nID: \`${call_sid}\`\nTime: ${new Date().toLocaleString()}\n\nDetails in system logs.`;
+            }
         }
 
-        try {
-            return template();
-        } catch (error) {
-            console.error(`❌ Error generating message for ${notification_type}:`, error);
-            return `🔔 *System Notification*\n\nType: ${notification_type}\nID: \`${call_sid}\`\nTime: ${new Date().toLocaleString()}\n\nDetails in system logs.`;
+        const replyMarkup = this.buildSmsFollowUpKeyboard(notification_type, callData, call_sid);
+
+        if (replyMarkup) {
+            text += `\n\n⚡ Quick actions:`;
         }
+
+        return { text, replyMarkup };
     }
 
-    async sendTelegramMessage(chatId, message) {
+    buildSmsFollowUpKeyboard(notificationType, callData, callSid) {
+        const eligibleTypes = new Set(['sms_sent', 'sms_delivered', 'sms_outbound_sent', 'sms_completed']);
+        if (!eligibleTypes.has(notificationType)) {
+            return null;
+        }
+
+        const phoneNumber = callData.phone_number;
+        if (!phoneNumber || phoneNumber === 'Unknown') {
+            return null;
+        }
+
+        const sanitizedPhone = String(phoneNumber).replace(/[^\d+]/g, '');
+        if (!sanitizedPhone) {
+            return null;
+        }
+
+        const base = `FOLLOWUP_SMS:${sanitizedPhone}:`;
+
+        return {
+            inline_keyboard: [
+                [
+                    { text: '💬 Send another SMS', callback_data: `${base}new` },
+                    { text: '⏰ Schedule follow-up', callback_data: `${base}schedule` }
+                ],
+                [
+                    { text: '📞 Call contact', callback_data: `${base}call` }
+                ]
+            ]
+        };
+    }
+
+    async sendTelegramMessage(chatId, message, replyMarkup = null) {
         if (!this.telegramBotToken) {
             console.error('❌ Telegram bot token not configured');
             return false;
@@ -292,7 +332,8 @@ class EnhancedWebhookService {
                     chat_id: chatId,
                     text: message,
                     parse_mode: 'Markdown',
-                    disable_web_page_preview: true
+                    disable_web_page_preview: true,
+                    reply_markup: replyMarkup || undefined
                 },
                 {
                     timeout: 10000,

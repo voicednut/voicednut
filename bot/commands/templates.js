@@ -2,14 +2,22 @@ const axios = require('axios');
 const config = require('../config');
 const { getUser, isAdmin } = require('../db/db');
 const {
-  BUSINESS_OPTIONS,
+  getBusinessOptions,
+  findBusinessOption,
   MOOD_OPTIONS,
   URGENCY_OPTIONS,
   TECH_LEVEL_OPTIONS,
   askOptionWithButtons,
-  getOptionLabel
+  getOptionLabel,
+  invalidatePersonaCache
 } = require('../utils/persona');
 const { extractTemplateVariables } = require('../utils/templates');
+const {
+  startOperation,
+  ensureOperationActive,
+  OperationCancelledError,
+  getCurrentOpId
+} = require('../utils/sessionState');
 
 const templatesApi = axios.create({
   baseURL: config.templatesApiUrl.replace(/\/+$/, ''),
@@ -127,8 +135,17 @@ async function promptText(
   conversation,
   ctx,
   message,
-  { allowEmpty = false, allowSkip = false, defaultValue = null, parse = (value) => value } = {}
+  {
+    allowEmpty = false,
+    allowSkip = false,
+    defaultValue = null,
+    parse = (value) => value,
+    ensureActive
+  } = {}
 ) {
+  const safeEnsureActive = typeof ensureActive === 'function'
+    ? ensureActive
+    : () => ensureOperationActive(ctx, getCurrentOpId(ctx));
   const hints = [];
   if (defaultValue !== null && defaultValue !== undefined && defaultValue !== '') {
     hints.push(`Current: ${defaultValue}`);
@@ -142,6 +159,7 @@ async function promptText(
   await ctx.reply(promptMessage, { parse_mode: 'Markdown' });
 
   const response = await conversation.wait();
+  safeEnsureActive();
   const text = response?.message?.text?.trim();
 
   if (!text) {
@@ -167,7 +185,10 @@ async function promptText(
   }
 }
 
-async function confirm(conversation, ctx, prompt) {
+async function confirm(conversation, ctx, prompt, ensureActive) {
+  const safeEnsureActive = typeof ensureActive === 'function'
+    ? ensureActive
+    : () => ensureOperationActive(ctx, getCurrentOpId(ctx));
   const choice = await askOptionWithButtons(
     conversation,
     ctx,
@@ -176,12 +197,15 @@ async function confirm(conversation, ctx, prompt) {
       { id: 'yes', label: '✅ Yes' },
       { id: 'no', label: '❌ No' }
     ],
-    { prefix: 'confirm', columns: 2 }
+    { prefix: 'confirm', columns: 2, ensureActive: safeEnsureActive }
   );
   return choice.id === 'yes';
 }
 
-async function collectPlaceholderValues(conversation, ctx, placeholders) {
+async function collectPlaceholderValues(conversation, ctx, placeholders, ensureActive) {
+  const safeEnsureActive = typeof ensureActive === 'function'
+    ? ensureActive
+    : () => ensureOperationActive(ctx, getCurrentOpId(ctx));
   const values = {};
   for (const placeholder of placeholders) {
     await ctx.reply(
@@ -189,6 +213,7 @@ async function collectPlaceholderValues(conversation, ctx, placeholders) {
       { parse_mode: 'Markdown' }
     );
     const response = await conversation.wait();
+    safeEnsureActive();
     const text = response?.message?.text?.trim();
     if (!text) {
       continue;
@@ -234,7 +259,7 @@ function toPersonaOverrides(personaResult) {
 function buildPersonaSummaryFromConfig(template) {
   const summary = [];
   if (template.business_id) {
-    const business = BUSINESS_OPTIONS.find((option) => option.id === template.business_id);
+    const business = findBusinessOption(template.business_id);
     summary.push(`Persona: ${business ? business.label : template.business_id}`);
   }
   const persona = template.persona_config || {};
@@ -260,7 +285,7 @@ function buildPersonaSummaryFromOverrides(overrides = {}) {
 
   const summary = [];
   if (overrides.business_id) {
-    const business = BUSINESS_OPTIONS.find((option) => option.id === overrides.business_id);
+    const business = findBusinessOption(overrides.business_id);
     summary.push(`Persona: ${business ? business.label : overrides.business_id}`);
   }
   if (overrides.purpose) {
@@ -279,13 +304,19 @@ function buildPersonaSummaryFromOverrides(overrides = {}) {
 }
 
 async function collectPersonaConfig(conversation, ctx, defaults = {}, options = {}) {
-  const { allowCancel = true } = options;
+  const { allowCancel = true, ensureActive } = options;
+  const safeEnsureActive = typeof ensureActive === 'function'
+    ? ensureActive
+    : () => ensureOperationActive(ctx, getCurrentOpId(ctx));
+  const businessOptions = await getBusinessOptions();
+  safeEnsureActive();
+
   const personaSummary = [];
   let businessSelection = defaults.business_id
-    ? BUSINESS_OPTIONS.find((option) => option.id === defaults.business_id)
+    ? businessOptions.find((option) => option.id === defaults.business_id)
     : null;
 
-  const selectionOptions = BUSINESS_OPTIONS.map((option) => ({ ...option }));
+  const selectionOptions = businessOptions.map((option) => ({ ...option }));
   if (allowCancel) {
     selectionOptions.unshift({ id: 'cancel', label: '❌ Cancel', custom: true });
   }
@@ -299,9 +330,15 @@ Choose the primary business context.`,
     {
       prefix: 'template-business',
       columns: 2,
+      ensureActive: safeEnsureActive,
       formatLabel: (option) => (option.custom && option.id !== 'cancel' ? '✍️ Custom persona' : option.label)
     }
   );
+
+  if (!businessChoice) {
+    await ctx.reply('❌ Invalid persona selection. Please try again.');
+    return null;
+  }
 
   if (allowCancel && businessChoice.id === 'cancel') {
     return null;
@@ -335,6 +372,7 @@ This helps align tone and follow-up actions.`;
         {
           prefix: 'template-purpose',
           columns: 1,
+           ensureActive: safeEnsureActive,
           formatLabel: (option) => `${option.emoji || '•'} ${option.label}`
         }
       );
@@ -355,7 +393,7 @@ _Current: ${getOptionLabel(MOOD_OPTIONS, personaConfig.emotion)}_`
       ctx,
       tonePrompt,
       MOOD_OPTIONS,
-      { prefix: 'template-tone', columns: 2 }
+      { prefix: 'template-tone', columns: 2, ensureActive: safeEnsureActive }
     );
     personaConfig.emotion = moodSelection.id;
     personaSummary.push(`Tone: ${moodSelection.label}`);
@@ -370,7 +408,7 @@ _Current: ${getOptionLabel(URGENCY_OPTIONS, personaConfig.urgency)}_`
       ctx,
       urgencyPrompt,
       URGENCY_OPTIONS,
-      { prefix: 'template-urgency', columns: 2 }
+      { prefix: 'template-urgency', columns: 2, ensureActive: safeEnsureActive }
     );
     personaConfig.urgency = urgencySelection.id;
     personaSummary.push(`Urgency: ${urgencySelection.label}`);
@@ -385,7 +423,7 @@ _Current: ${getOptionLabel(TECH_LEVEL_OPTIONS, personaConfig.technical_level)}_`
       ctx,
       techPrompt,
       TECH_LEVEL_OPTIONS,
-      { prefix: 'template-tech', columns: 2 }
+      { prefix: 'template-tech', columns: 2, ensureActive: safeEnsureActive }
     );
     personaConfig.technical_level = techSelection.id;
     personaSummary.push(`Technical level: ${techSelection.label}`);
@@ -404,12 +442,21 @@ _Current: ${getOptionLabel(TECH_LEVEL_OPTIONS, personaConfig.technical_level)}_`
   };
 }
 
-async function collectPromptAndVoice(conversation, ctx, defaults = {}) {
+async function collectPromptAndVoice(conversation, ctx, defaults = {}, ensureActive) {
+  const safeEnsureActive = typeof ensureActive === 'function'
+    ? ensureActive
+    : () => ensureOperationActive(ctx, getCurrentOpId(ctx));
   const prompt = await promptText(
     conversation,
     ctx,
     '🧠 Provide the system prompt for this call template. This sets the AI behavior.',
-    { allowEmpty: false, allowSkip: !!defaults.prompt, defaultValue: defaults.prompt, parse: (value) => value }
+    {
+      allowEmpty: false,
+      allowSkip: !!defaults.prompt,
+      defaultValue: defaults.prompt,
+      parse: (value) => value,
+      ensureActive: safeEnsureActive
+    }
   );
 
   if (prompt === null) {
@@ -420,7 +467,13 @@ async function collectPromptAndVoice(conversation, ctx, defaults = {}) {
     conversation,
     ctx,
     '🗣️ Provide the first message the agent says when the call connects.',
-    { allowEmpty: false, allowSkip: !!defaults.first_message, defaultValue: defaults.first_message, parse: (value) => value }
+    {
+      allowEmpty: false,
+      allowSkip: !!defaults.first_message,
+      defaultValue: defaults.first_message,
+      parse: (value) => value,
+      ensureActive: safeEnsureActive
+    }
   );
 
   if (firstMessage === null) {
@@ -432,7 +485,13 @@ async function collectPromptAndVoice(conversation, ctx, defaults = {}) {
     conversation,
     ctx,
     '🎤 Enter the Deepgram voice model for this template (or type skip to use the default).',
-    { allowEmpty: true, allowSkip: true, defaultValue: voicePrompt, parse: (value) => value }
+    {
+      allowEmpty: true,
+      allowSkip: true,
+      defaultValue: voicePrompt,
+      parse: (value) => value,
+      ensureActive: safeEnsureActive
+    }
   );
 
   if (voiceModel === null) {
@@ -482,7 +541,7 @@ function formatCallTemplateSummary(template) {
     summary.push(`📝 ${escapeMarkdown(template.description)}`);
   }
   if (template.business_id) {
-    const business = BUSINESS_OPTIONS.find((option) => option.id === template.business_id);
+    const business = findBusinessOption(template.business_id);
     summary.push(`🏢 Persona: ${escapeMarkdown(business ? business.label : template.business_id)}`);
   }
   const personaSummary = buildPersonaSummaryFromConfig(template);
@@ -516,10 +575,16 @@ function formatCallTemplateSummary(template) {
   return summary.join('\n');
 }
 
-async function previewCallTemplate(conversation, ctx, template) {
+async function previewCallTemplate(conversation, ctx, template, ensureActive) {
+  const safeEnsureActive = typeof ensureActive === 'function'
+    ? ensureActive
+    : () => ensureOperationActive(ctx, getCurrentOpId(ctx));
   const phonePrompt =
     '📞 Enter the test phone number (E.164 format, e.g., +1234567890) to receive a preview call.';
-  const testNumber = await promptText(conversation, ctx, phonePrompt, { allowEmpty: false });
+  const testNumber = await promptText(conversation, ctx, phonePrompt, {
+    allowEmpty: false,
+    ensureActive: safeEnsureActive
+  });
   if (!testNumber) {
     await ctx.reply('❌ Preview cancelled.');
     return;
@@ -539,7 +604,7 @@ async function previewCallTemplate(conversation, ctx, template) {
 
   if (placeholderSet.size > 0) {
     await ctx.reply('🧩 This template has placeholders. Provide values where needed (type skip to leave unchanged).');
-    const values = await collectPlaceholderValues(conversation, ctx, Array.from(placeholderSet));
+    const values = await collectPlaceholderValues(conversation, ctx, Array.from(placeholderSet), safeEnsureActive);
     if (values === null) {
       await ctx.reply('❌ Preview cancelled.');
       return;
@@ -596,12 +661,19 @@ async function previewCallTemplate(conversation, ctx, template) {
   }
 }
 
-async function createCallTemplateFlow(conversation, ctx) {
+async function createCallTemplateFlow(conversation, ctx, ensureActive) {
+  const safeEnsureActive = typeof ensureActive === 'function'
+    ? ensureActive
+    : () => ensureOperationActive(ctx, getCurrentOpId(ctx));
   const name = await promptText(
     conversation,
     ctx,
     '🆕 *Template name*\nEnter a unique name for this call template.',
-    { allowEmpty: false, parse: (value) => value.trim() }
+    {
+      allowEmpty: false,
+      parse: (value) => value.trim(),
+      ensureActive: safeEnsureActive
+    }
   );
 
   if (!name) {
@@ -613,20 +685,25 @@ async function createCallTemplateFlow(conversation, ctx) {
     conversation,
     ctx,
     '📝 Provide an optional description for this template (or type skip).',
-    { allowEmpty: true, allowSkip: true, parse: (value) => value.trim() }
+    {
+      allowEmpty: true,
+      allowSkip: true,
+      parse: (value) => value.trim(),
+      ensureActive: safeEnsureActive
+    }
   );
   if (description === null) {
     await ctx.reply('❌ Template creation cancelled.');
     return;
   }
 
-  const personaResult = await collectPersonaConfig(conversation, ctx, {}, { allowCancel: true });
+  const personaResult = await collectPersonaConfig(conversation, ctx, {}, { allowCancel: true, ensureActive: safeEnsureActive });
   if (!personaResult) {
     await ctx.reply('❌ Template creation cancelled.');
     return;
   }
 
-  const promptAndVoice = await collectPromptAndVoice(conversation, ctx, {});
+  const promptAndVoice = await collectPromptAndVoice(conversation, ctx, {}, safeEnsureActive);
   if (!promptAndVoice) {
     await ctx.reply('❌ Template creation cancelled.');
     return;
@@ -651,14 +728,23 @@ async function createCallTemplateFlow(conversation, ctx) {
   }
 }
 
-async function editCallTemplateFlow(conversation, ctx, template) {
+async function editCallTemplateFlow(conversation, ctx, template, ensureActive) {
+  const safeEnsureActive = typeof ensureActive === 'function'
+    ? ensureActive
+    : () => ensureOperationActive(ctx, getCurrentOpId(ctx));
   const updates = {};
 
   const name = await promptText(
     conversation,
     ctx,
     '✏️ Update template name (or type skip to keep current).',
-    { allowEmpty: false, allowSkip: true, defaultValue: template.name, parse: (value) => value.trim() }
+    {
+      allowEmpty: false,
+      allowSkip: true,
+      defaultValue: template.name,
+      parse: (value) => value.trim(),
+      ensureActive: safeEnsureActive
+    }
   );
   if (name === null) {
     await ctx.reply('❌ Update cancelled.');
@@ -676,7 +762,13 @@ async function editCallTemplateFlow(conversation, ctx, template) {
     conversation,
     ctx,
     '📝 Update description (or type skip).',
-    { allowEmpty: true, allowSkip: true, defaultValue: template.description || '', parse: (value) => value.trim() }
+    {
+      allowEmpty: true,
+      allowSkip: true,
+      defaultValue: template.description || '',
+      parse: (value) => value.trim(),
+      ensureActive: safeEnsureActive
+    }
   );
   if (description === null) {
     await ctx.reply('❌ Update cancelled.');
@@ -686,9 +778,9 @@ async function editCallTemplateFlow(conversation, ctx, template) {
     updates.description = description.length ? description : null;
   }
 
-  const adjustPersona = await confirm(conversation, ctx, 'Would you like to update the persona settings?');
+  const adjustPersona = await confirm(conversation, ctx, 'Would you like to update the persona settings?', safeEnsureActive);
   if (adjustPersona) {
-    const personaResult = await collectPersonaConfig(conversation, ctx, template, { allowCancel: true });
+    const personaResult = await collectPersonaConfig(conversation, ctx, template, { allowCancel: true, ensureActive: safeEnsureActive });
     if (!personaResult) {
       await ctx.reply('❌ Update cancelled.');
       return;
@@ -697,9 +789,9 @@ async function editCallTemplateFlow(conversation, ctx, template) {
     updates.persona_config = personaResult.persona_config;
   }
 
-  const adjustPrompt = await confirm(conversation, ctx, 'Update prompt, first message, or voice settings?');
+  const adjustPrompt = await confirm(conversation, ctx, 'Update prompt, first message, or voice settings?', safeEnsureActive);
   if (adjustPrompt) {
-    const promptAndVoice = await collectPromptAndVoice(conversation, ctx, template);
+    const promptAndVoice = await collectPromptAndVoice(conversation, ctx, template, safeEnsureActive);
     if (!promptAndVoice) {
       await ctx.reply('❌ Update cancelled.');
       return;
@@ -723,12 +815,20 @@ async function editCallTemplateFlow(conversation, ctx, template) {
   }
 }
 
-async function cloneCallTemplateFlow(conversation, ctx, template) {
+async function cloneCallTemplateFlow(conversation, ctx, template, ensureActive) {
+  const safeEnsureActive = typeof ensureActive === 'function'
+    ? ensureActive
+    : () => ensureOperationActive(ctx, getCurrentOpId(ctx));
   const name = await promptText(
     conversation,
     ctx,
     `🆕 Enter a name for the clone of *${escapeMarkdown(template.name)}*.`,
-    { allowEmpty: false, parse: (value) => value.trim(), defaultValue: null }
+    {
+      allowEmpty: false,
+      parse: (value) => value.trim(),
+      defaultValue: null,
+      ensureActive: safeEnsureActive
+    }
   );
   if (!name) {
     await ctx.reply('❌ Clone cancelled.');
@@ -739,7 +839,13 @@ async function cloneCallTemplateFlow(conversation, ctx, template) {
     conversation,
     ctx,
     '📝 Optionally provide a description for the new template (or type skip).',
-    { allowEmpty: true, allowSkip: true, defaultValue: template.description || '', parse: (value) => value.trim() }
+    {
+      allowEmpty: true,
+      allowSkip: true,
+      defaultValue: template.description || '',
+      parse: (value) => value.trim(),
+      ensureActive: safeEnsureActive
+    }
   );
   if (description === null) {
     await ctx.reply('❌ Clone cancelled.');
@@ -758,8 +864,16 @@ async function cloneCallTemplateFlow(conversation, ctx, template) {
   }
 }
 
-async function deleteCallTemplateFlow(conversation, ctx, template) {
-  const confirmed = await confirm(conversation, ctx, `Are you sure you want to delete *${escapeMarkdown(template.name)}*?`);
+async function deleteCallTemplateFlow(conversation, ctx, template, ensureActive) {
+  const safeEnsureActive = typeof ensureActive === 'function'
+    ? ensureActive
+    : () => ensureOperationActive(ctx, getCurrentOpId(ctx));
+  const confirmed = await confirm(
+    conversation,
+    ctx,
+    `Are you sure you want to delete *${escapeMarkdown(template.name)}*?`,
+    safeEnsureActive
+  );
   if (!confirmed) {
     await ctx.reply('Deletion cancelled.');
     return;
@@ -774,7 +888,10 @@ async function deleteCallTemplateFlow(conversation, ctx, template) {
   }
 }
 
-async function showCallTemplateDetail(conversation, ctx, template) {
+async function showCallTemplateDetail(conversation, ctx, template, ensureActive) {
+  const safeEnsureActive = typeof ensureActive === 'function'
+    ? ensureActive
+    : () => ensureOperationActive(ctx, getCurrentOpId(ctx));
   let viewing = true;
   while (viewing) {
     const summary = formatCallTemplateSummary(template);
@@ -791,15 +908,15 @@ async function showCallTemplateDetail(conversation, ctx, template) {
         { id: 'delete', label: '🗑️ Delete' },
         { id: 'back', label: '⬅️ Back' }
       ],
-      { prefix: 'call-template-action', columns: 2 }
+      { prefix: 'call-template-action', columns: 2, ensureActive: safeEnsureActive }
     );
 
     switch (action.id) {
       case 'preview':
-        await previewCallTemplate(conversation, ctx, template);
+        await previewCallTemplate(conversation, ctx, template, safeEnsureActive);
         break;
       case 'edit':
-        await editCallTemplateFlow(conversation, ctx, template);
+        await editCallTemplateFlow(conversation, ctx, template, safeEnsureActive);
         try {
           template = await fetchCallTemplateById(template.id);
         } catch (error) {
@@ -809,10 +926,10 @@ async function showCallTemplateDetail(conversation, ctx, template) {
         }
         break;
       case 'clone':
-        await cloneCallTemplateFlow(conversation, ctx, template);
+        await cloneCallTemplateFlow(conversation, ctx, template, safeEnsureActive);
         break;
       case 'delete':
-        await deleteCallTemplateFlow(conversation, ctx, template);
+        await deleteCallTemplateFlow(conversation, ctx, template, safeEnsureActive);
         viewing = false;
         break;
       case 'back':
@@ -824,9 +941,13 @@ async function showCallTemplateDetail(conversation, ctx, template) {
   }
 }
 
-async function listCallTemplatesFlow(conversation, ctx) {
+async function listCallTemplatesFlow(conversation, ctx, ensureActive) {
+  const safeEnsureActive = typeof ensureActive === 'function'
+    ? ensureActive
+    : () => ensureOperationActive(ctx, getCurrentOpId(ctx));
   try {
     const templates = await fetchCallTemplates();
+    safeEnsureActive();
     if (!templates.length) {
       await ctx.reply('ℹ️ No call templates found. Use the create action to add one.');
       return;
@@ -860,7 +981,7 @@ async function listCallTemplatesFlow(conversation, ctx) {
       ctx,
       'Choose a call template to manage.',
       options,
-      { prefix: 'call-template-select', columns: 1, formatLabel: (option) => option.label }
+      { prefix: 'call-template-select', columns: 1, formatLabel: (option) => option.label, ensureActive: safeEnsureActive }
     );
 
     if (selection.id === 'back') {
@@ -875,12 +996,13 @@ async function listCallTemplatesFlow(conversation, ctx) {
 
     try {
       const template = await fetchCallTemplateById(templateId);
+      safeEnsureActive();
       if (!template) {
         await ctx.reply('❌ Template not found.');
         return;
       }
 
-      await showCallTemplateDetail(conversation, ctx, template);
+      await showCallTemplateDetail(conversation, ctx, template, safeEnsureActive);
     } catch (error) {
       console.error('Failed to load call template details:', error);
       await ctx.reply(formatTemplatesApiError(error, 'Failed to load template details'));
@@ -891,7 +1013,10 @@ async function listCallTemplatesFlow(conversation, ctx) {
   }
 }
 
-async function callTemplatesMenu(conversation, ctx) {
+async function callTemplatesMenu(conversation, ctx, ensureActive) {
+  const safeEnsureActive = typeof ensureActive === 'function'
+    ? ensureActive
+    : () => ensureOperationActive(ctx, getCurrentOpId(ctx));
   let open = true;
   while (open) {
     const action = await askOptionWithButtons(
@@ -903,15 +1028,15 @@ async function callTemplatesMenu(conversation, ctx) {
         { id: 'create', label: '➕ Create template' },
         { id: 'back', label: '⬅️ Back' }
       ],
-      { prefix: 'call-template-main', columns: 1 }
+      { prefix: 'call-template-main', columns: 1, ensureActive: safeEnsureActive }
     );
 
     switch (action.id) {
       case 'list':
-        await listCallTemplatesFlow(conversation, ctx);
+        await listCallTemplatesFlow(conversation, ctx, safeEnsureActive);
         break;
       case 'create':
-        await createCallTemplateFlow(conversation, ctx);
+        await createCallTemplateFlow(conversation, ctx, safeEnsureActive);
         break;
       case 'back':
         open = false;
@@ -1450,48 +1575,69 @@ async function smsTemplatesMenu(conversation, ctx) {
 }
 
 async function templatesFlow(conversation, ctx) {
-  const user = await new Promise((resolve) => getUser(ctx.from.id, resolve));
-  if (!user) {
-    await ctx.reply('❌ You are not authorized to use this bot.');
-    return;
-  }
+  const opId = startOperation(ctx, 'templates');
+  const ensureActive = () => ensureOperationActive(ctx, opId);
 
-  const adminStatus = await new Promise((resolve) => isAdmin(ctx.from.id, resolve));
-  if (!adminStatus) {
-    await ctx.reply('❌ This command is for administrators only.');
-    return;
-  }
+  try {
+    const user = await new Promise((resolve) => getUser(ctx.from.id, resolve));
+    ensureActive();
+    if (!user) {
+      await ctx.reply('❌ You are not authorized to use this bot.');
+      return;
+    }
 
-  let active = true;
-  while (active) {
-    const selection = await askOptionWithButtons(
-      conversation,
-      ctx,
-      '🧰 *Template Designer*\nChoose which templates to manage.',
-      [
-        { id: 'call', label: '☎️ Call templates' },
-        { id: 'sms', label: '💬 SMS templates' },
-        { id: 'exit', label: '🚪 Exit' }
-      ],
-      { prefix: 'template-channel', columns: 1 }
-    );
+    const adminStatus = await new Promise((resolve) => isAdmin(ctx.from.id, resolve));
+    ensureActive();
+    if (!adminStatus) {
+      await ctx.reply('❌ This command is for administrators only.');
+      return;
+    }
 
-    switch (selection.id) {
-      case 'call':
-        await callTemplatesMenu(conversation, ctx);
-        break;
-      case 'sms':
-        await smsTemplatesMenu(conversation, ctx);
-        break;
-      case 'exit':
-        active = false;
-        break;
-      default:
-        break;
+    // Warm persona cache so downstream selections have up-to-date personas.
+    await getBusinessOptions();
+    ensureActive();
+
+    let active = true;
+    while (active) {
+      const selection = await askOptionWithButtons(
+        conversation,
+        ctx,
+        '🧰 *Template Designer*\nChoose which templates to manage.',
+        [
+          { id: 'call', label: '☎️ Call templates' },
+          { id: 'sms', label: '💬 SMS templates' },
+          { id: 'exit', label: '🚪 Exit' }
+        ],
+        { prefix: 'template-channel', columns: 1, ensureActive }
+      );
+
+      switch (selection.id) {
+        case 'call':
+          await callTemplatesMenu(conversation, ctx, ensureActive);
+          break;
+        case 'sms':
+          await smsTemplatesMenu(conversation, ctx, ensureActive);
+          break;
+        case 'exit':
+          active = false;
+          break;
+        default:
+          break;
+      }
+    }
+
+    await ctx.reply('✅ Template designer closed.');
+  } catch (error) {
+    if (error instanceof OperationCancelledError) {
+      console.log('Templates flow cancelled:', error.message);
+      return;
+    }
+    throw error;
+  } finally {
+    if (ctx.session?.currentOp?.id === opId) {
+      ctx.session.currentOp = null;
     }
   }
-
-  await ctx.reply('✅ Template designer closed.');
 }
 
 function registerTemplatesCommand(bot) {
