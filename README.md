@@ -32,6 +32,14 @@ A comprehensive Telegram bot system for making AI-powered voice calls using Twil
 - Text-to-speech with Deepgram
 - Speech-to-text with real-time processing
 
+## 🔁 Provider Modes (Twilio, AWS Connect, Vonage)
+
+- Set the default voice backbone with `CALL_PROVIDER` in `api/.env` (`twilio`, `aws`, or `vonage`).
+- Admins can switch live traffic at any time via `/provider [twilio|aws|vonage|status]` in Telegram (requires `ADMIN_API_TOKEN`).
+- Twilio mode keeps the original Media Streams flow; AWS mode routes through Connect/Kinesis per `aws-migration.md`; Vonage mode uses the Vonage Voice API and WebSocket streaming.
+- Each provider has matching SMS adapters (Twilio SMS, AWS Pinpoint, Vonage SMS) so outbound texts follow the active backbone.
+- When Twilio is selected but credentials are missing, the API now fails fast with a targeted message pointing to the relevant `.env` entries and the `npm run setup --prefix api` helper.
+
 ## 🏗️ System Architecture
 
 ```mermaid
@@ -68,22 +76,26 @@ graph TB
    git clone https://github.com/voicednut/voicednut.git
    cd voicednut
    ```
+1. **Generate environment files**
+
+```bash
+npm run setup --prefix api
+npm run setup --prefix bot
+```
+   Follow the prompts to supply credentials (press Enter to accept the suggested defaults). The scripts will scaffold `api/.env` and `bot/.env`; review the files afterwards for any remaining blanks. If you maintain additional workers, copy one of the templates and adjust as needed.
+
 1. **Set up API Server**
-   
+
    ```bash
    cd api
    npm install
-   cp .env.example .env
-   # Edit .env with your credentials
    npm start
    ```
 1. **Set up Bot**
-   
+
    ```bash
    cd ../bot
    npm install
-   cp .env.example .env
-   # Edit .env with your credentials
    npm start
    ```
 1. **Start using the bot**
@@ -378,6 +390,7 @@ Available TTS voices:
 - API: `GET /health`
 - Bot: `/health` command
 - Admin: `/status` command
+- Admin: `/provider [twilio|aws|vonage|status]` to inspect or switch the active call backbone
 
 ### Logging
 

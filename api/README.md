@@ -17,6 +17,24 @@ Features:
 - 🛠️ Allows the GPT to call external tools.
 - 🎭 Persona composer tailors tone, mood, and phrasing across business domains, channels, and urgency levels.
 
+## AWS Connect Mode
+
+Twilio Media Streams is still supported, but the API now ships with an AWS-native path that uses Amazon Connect, Kinesis/Transcribe, and Polly for end-to-end audio orchestration. Flip the provider by setting `CALL_PROVIDER=aws` and providing the following environment variables:
+
+- `AWS_REGION`, `AWS_CONNECT_INSTANCE_ID`, and `AWS_CONNECT_CONTACT_FLOW_ID`
+- `AWS_POLLY_OUTPUT_BUCKET` (Polly audio will be persisted here for Connect to play)
+- `AWS_PINPOINT_APPLICATION_ID` and `AWS_PINPOINT_ORIGINATION_NUMBER` for SMS
+- Optional: `AWS_TRANSCRIBE_LANGUAGE_CODE`, custom queue/phone routing, and vocabulary filters
+
+When running in AWS mode:
+
+- Outbound calls are initiated through `AwsConnectAdapter.startOutboundCall`, which sets Connect contact attributes that your contact flow can read.
+- Real-time transcriptions should be forwarded to the API via the new `POST /aws/transcripts` endpoint (used by the StreamAdapter worker).
+- Contact state changes from Connect can be normalized by posting to `POST /aws/contact-events`.
+- AI responses are synthesized with Polly and queued for playback through contact attributes, so the contact flow can fetch the latest S3 object and play it back to the caller.
+
+Keep the Twilio credentials in place if you want a rapid rollback path—switching the provider back to `twilio` will re-enable the original websocket-based flow without redeploying code.
+
 ## Adaptive Persona and Mood Profiles
 
 The API ships with a persona composer that inspects call metadata (business domain, purpose, channel, urgency, and mood signals) and produces the appropriate system prompt and greeting. Editable templates live in:

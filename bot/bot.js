@@ -163,6 +163,7 @@ require('./commands/menu')(bot);
 require('./commands/guide')(bot);
 require('./commands/transcript')(bot);
 require('./commands/api')(bot);
+require('./commands/provider')(bot);
 require('./commands/webapp')(bot); // Register WebApp handler
 
 function escapeMarkdown(text = '') {
