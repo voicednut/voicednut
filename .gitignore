@@ -21,3 +21,7 @@ yarn-error.log*
 # Local databases or data files
 api/db/data.db
 bot/db/data.db
+
+# Instruction files
+.github/implementation.md
+codex.md

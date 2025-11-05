@@ -5,6 +5,80 @@ const { getUser, isAdmin } = require('../db/db');
 const MAX_PREVIEW_MESSAGES = 12;
 const MAX_CHUNK_LENGTH = 3800;
 
+function getDtmfLabel(input = {}) {
+    if (input.label && typeof input.label === 'string') {
+        return input.label;
+    }
+    if (input.stage_key && typeof input.stage_key === 'string' && input.stage_key.length) {
+        return input.stage_key.replace(/_/g, ' ');
+    }
+    return 'Entry';
+}
+
+function hasRawDigits(input = {}) {
+    if (!input) return false;
+    const digits = typeof input.digits === 'string' ? input.digits : null;
+    const masked = typeof input.masked_digits === 'string' ? input.masked_digits : null;
+    const raw = typeof input.raw_digits === 'string' ? input.raw_digits : digits;
+    if (!raw) return false;
+    if (!masked) return true;
+    return raw !== masked;
+}
+
+function buildDtmfSection(dtmfInputs = [], { useHtml = true } = {}) {
+    if (!Array.isArray(dtmfInputs) || dtmfInputs.length === 0) {
+        return '';
+    }
+
+    const lines = dtmfInputs.map((input) => {
+        const label = getDtmfLabel(input);
+        const displayDigits = String(
+            input.digits ??
+            input.raw_digits ??
+            input.masked_digits ??
+            '••••'
+        );
+        const maskedDigits = typeof input.masked_digits === 'string' ? input.masked_digits : null;
+        const timestamp = formatTimestamp(input.received_at);
+        const hasTimestamp = timestamp && timestamp !== 'Unknown time';
+        const showMasked = hasRawDigits(input) && maskedDigits && maskedDigits !== displayDigits;
+
+        if (useHtml) {
+            let line = `• <b>${escapeHtml(label)}</b>: <code>${escapeHtml(displayDigits)}</code>`;
+            if (showMasked) {
+                line += ` (masked: <code>${escapeHtml(maskedDigits)}</code>)`;
+            }
+            if (hasTimestamp) {
+                line += ` <i>(${escapeHtml(timestamp)})</i>`;
+            }
+            return line;
+        }
+
+        let line = `• ${label}: ${displayDigits}`;
+        if (showMasked) {
+            line += ` (masked: ${maskedDigits})`;
+        }
+        if (hasTimestamp) {
+            line += ` (${timestamp})`;
+        }
+        return line;
+    });
+
+    const rawPresent = dtmfInputs.some((input) => hasRawDigits(input));
+    const complianceNote = rawPresent
+        ? (useHtml
+            ? '<i>🚧 Dev compliance mode — raw keypad digits displayed. Handle with care.</i>'
+            : '🚧 Dev compliance mode — raw keypad digits displayed. Handle with care.')
+        : (useHtml
+            ? '<i>Digits masked per active compliance policy.</i>'
+            : 'Digits masked per active compliance policy.');
+
+    const separator = useHtml ? '\n' : '\n';
+    const sectionHeader = '🔢 Keypad Inputs:\n';
+
+    return `${sectionHeader}${lines.join(separator)}\n${complianceNote}\n`;
+}
+
 function escapeHtml(text = '') {
     return String(text)
         .replace(/&/g, '&amp;')
@@ -44,20 +118,23 @@ async function getTranscript(ctx, callSid) {
             return;
         }
 
+        const dtmfSection = buildDtmfSection(dtmfInputs, { useHtml: true }).trim();
+
         if (!transcripts.length) {
             let message = `<b>Call Details</b>\n\n`;
             message += `📞 Phone: <b>${escapeHtml(call.phone_number)}</b>\n`;
             message += `🆔 Call ID: <code>${escapeHtml(callSid)}</code>\n`;
+            message += `📡 Provider: ${escapeHtml((call.provider || 'Unknown').toUpperCase())}\n`;
             message += `⏱️ Duration: ${formatDuration(call.duration)}\n`;
             message += `📊 Status: ${escapeHtml(call.status || 'Unknown')}\n`;
-            if (dtmfInputs.length) {
-                message += `🔢 Keypad Input:\n`;
-                dtmfInputs.forEach((input, index) => {
-                    const timestamp = formatTimestamp(input.received_at);
-                    message += `• <code>${escapeHtml(input.digits)}</code> (${escapeHtml(timestamp)})\n`;
-                });
+            if (dtmfSection) {
+                message += `\n${dtmfSection}\n`;
             }
-            message += `\n❌ No transcript available yet.`;
+            if (dtmfInputs.length) {
+                message += '\n❌ Transcript not ready yet, but keypad inputs were captured.';
+            } else {
+                message += `\n❌ No transcript available yet.`;
+            }
 
             await ctx.reply(message, { parse_mode: 'HTML' });
             return;
@@ -66,15 +143,12 @@ async function getTranscript(ctx, callSid) {
         let message = `<b>Call Transcript</b>\n\n`;
         message += `📞 Phone: <b>${escapeHtml(call.phone_number)}</b>\n`;
         message += `🆔 Call ID: <code>${escapeHtml(callSid)}</code>\n`;
+        message += `📡 Provider: ${escapeHtml((call.provider || 'Unknown').toUpperCase())}\n`;
         message += `⏱️ Duration: ${formatDuration(call.duration)}\n`;
         message += `📊 Status: ${escapeHtml(call.status || 'Unknown')}\n`;
         message += `💬 Messages: ${transcripts.length}\n`;
-        if (dtmfInputs.length) {
-            message += `🔢 Keypad Inputs:\n`;
-            dtmfInputs.forEach((input) => {
-                const timestamp = formatTimestamp(input.received_at);
-                message += `• <code>${escapeHtml(input.digits)}</code> (${escapeHtml(timestamp)})\n`;
-            });
+        if (dtmfSection) {
+            message += `\n${dtmfSection}\n`;
         }
 
         if (call.call_summary) {
@@ -89,7 +163,8 @@ async function getTranscript(ctx, callSid) {
             const speakerLabel = entry.speaker === 'user' ? '👤 User' : '🤖 AI';
             const timestamp = formatTimestamp(entry.timestamp);
             message += `\n<b>${speakerLabel}</b> <i>${escapeHtml(timestamp)}</i>\n`;
-            message += `${escapeHtml(entry.message)}\n`;
+            const cleanMessage = entry.clean_message || entry.message || entry.raw_message || '';
+            message += `${escapeHtml(cleanMessage)}\n`;
         });
 
         if (transcripts.length > previewMessages.length) {
@@ -160,10 +235,12 @@ async function getCallsList(ctx, limit = 10) {
             const durationLabel = escapeHtml(call.duration_formatted || formatDuration(call.duration));
             const transcriptCount = call.transcript_count || 0;
             const dtmfCount = call.dtmf_input_count || 0;
+            const provider = escapeHtml((call.provider || 'unknown').toUpperCase());
 
             message += `${index + 1}. 📞 <b>${phone}</b>\n`;
             message += `&nbsp;&nbsp;🆔 <code>${callId}</code>\n`;
             message += `&nbsp;&nbsp;📅 ${createdDate} | ⏱️ ${durationLabel} | 📊 ${status}\n`;
+            message += `&nbsp;&nbsp;📡 Provider: ${provider}\n`;
             if (dtmfCount > 0) {
                 message += `&nbsp;&nbsp;🔢 Keypad entries: ${dtmfCount}\n`;
             }
@@ -206,21 +283,27 @@ async function sendFullTranscript(ctx, callSid) {
         let buffer = `📋 FULL CALL TRANSCRIPT\n\n`;
         buffer += `📞 Number: ${call.phone_number}\n`;
         buffer += `🆔 Call ID: ${callSid}\n`;
+        buffer += `📡 Provider: ${(call.provider || 'Unknown').toUpperCase()}\n`;
         buffer += `⏱️ Duration: ${formatDuration(call.duration)}\n`;
         buffer += `📊 Status: ${call.status || 'Unknown'}\n`;
         buffer += `💬 Messages: ${transcripts.length}\n`;
-        if (dtmfInputs.length) {
-            buffer += `🔢 Keypad Inputs:\n`;
-            dtmfInputs.forEach((input) => {
-                buffer += `  - ${input.digits} (${formatTimestamp(input.received_at)})\n`;
-            });
+
+        const dtmfPlainSection = buildDtmfSection(dtmfInputs, { useHtml: false }).trim();
+        if (dtmfPlainSection) {
+            buffer += `\n${dtmfPlainSection}\n`;
         }
+
+        if (call.call_summary) {
+            buffer += `\nSUMMARY:\n${call.call_summary}\n`;
+        }
+
         buffer += `\nCONVERSATION:\n`;
 
         transcripts.forEach((entry) => {
             const speakerLabel = entry.speaker === 'user' ? '👤 USER' : '🤖 AI';
             const timestamp = formatTimestamp(entry.timestamp);
-            buffer += `\n${speakerLabel} (${timestamp}):\n${entry.message}\n`;
+            const messageBody = entry.clean_message || entry.message || entry.raw_message || '';
+            buffer += `\n${speakerLabel} (${timestamp}):\n${messageBody}\n`;
         });
 
         const chunks = [];

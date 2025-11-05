@@ -7,11 +7,43 @@ class OperationCancelledError extends Error {
   }
 }
 
+class FlowContext {
+  constructor(name, ttlMs = 10 * 60 * 1000) {
+    this.name = name;
+    this.ttlMs = ttlMs;
+    this.createdAt = Date.now();
+    this.updatedAt = this.createdAt;
+    this.step = null;
+    this.state = {};
+  }
+
+  get expired() {
+    return Date.now() - this.updatedAt > this.ttlMs;
+  }
+
+  touch(step = null) {
+    this.updatedAt = Date.now();
+    if (step) {
+      this.step = step;
+    }
+  }
+
+  reset(name = this.name) {
+    this.name = name;
+    this.createdAt = Date.now();
+    this.updatedAt = this.createdAt;
+    this.step = null;
+    this.state = {};
+  }
+}
+
 const initialSessionState = () => ({
   currentOp: null,
   lastCommand: null,
   pendingControllers: [],
-  meta: {}
+  meta: {},
+  flow: null,
+  errors: []
 });
 
 function ensureSession(ctx) {
@@ -21,6 +53,8 @@ function ensureSession(ctx) {
     ctx.session.currentOp = ctx.session.currentOp || null;
     ctx.session.pendingControllers = ctx.session.pendingControllers || [];
     ctx.session.meta = ctx.session.meta || {};
+    ctx.session.flow = ctx.session.flow || null;
+    ctx.session.errors = Array.isArray(ctx.session.errors) ? ctx.session.errors : [];
   }
 }
 
@@ -86,6 +120,7 @@ async function cancelActiveFlow(ctx, reason = 'reset') {
 
   ctx.session.currentOp = null;
   ctx.session.meta = {};
+  ctx.session.flow = null;
 }
 
 function resetSession(ctx) {
@@ -94,11 +129,56 @@ function resetSession(ctx) {
   ctx.session.lastCommand = null;
   ctx.session.meta = {};
   ctx.session.pendingControllers = [];
+  ctx.session.flow = null;
+  ctx.session.errors = [];
 }
 
 function ensureOperationActive(ctx, opId) {
   if (!isOperationActive(ctx, opId)) {
     throw new OperationCancelledError();
+  }
+}
+
+function ensureFlow(ctx, name, options = {}) {
+  ensureSession(ctx);
+  const ttlMs = typeof options.ttlMs === 'number' && options.ttlMs > 0 ? options.ttlMs : 10 * 60 * 1000;
+  if (!ctx.session.flow || ctx.session.flow.name !== name || ctx.session.flow.expired) {
+    ctx.session.flow = new FlowContext(name, ttlMs);
+  } else {
+    ctx.session.flow.touch(options.step || null);
+  }
+  return ctx.session.flow;
+}
+
+async function safeReset(ctx, reason = 'reset', options = {}) {
+  const {
+    message = '⚠️ Session expired. Restarting call setup...',
+    menuHint = '📋 Use /menu to start again.',
+    notify = true
+  } = options;
+
+  ensureSession(ctx);
+  await cancelActiveFlow(ctx, reason);
+  resetSession(ctx);
+
+  if (!notify) {
+    return;
+  }
+
+  const lines = [];
+  if (message) {
+    lines.push(message);
+  }
+  if (menuHint) {
+    lines.push(menuHint);
+  }
+
+  if (lines.length > 0) {
+    try {
+      await ctx.reply(lines.join('\n'));
+    } catch (error) {
+      console.warn('safeReset reply failed:', error.message);
+    }
   }
 }
 
@@ -112,5 +192,8 @@ module.exports = {
   resetSession,
   ensureSession,
   ensureOperationActive,
+  ensureFlow,
+  safeReset,
+  FlowContext,
   OperationCancelledError
 };

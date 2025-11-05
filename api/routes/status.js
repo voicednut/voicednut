@@ -1,4 +1,50 @@
 const axios = require('axios');
+const {
+  formatSummary,
+  shouldRevealRawDigits,
+  decryptDigits,
+  getStageDefinition,
+  normalizeStage,
+} = require('../utils/dtmf');
+
+function parseDtmfMetadata(metadata) {
+  if (!metadata) {
+    return {};
+  }
+  if (typeof metadata === 'object' && !Array.isArray(metadata)) {
+    return metadata;
+  }
+  try {
+    return JSON.parse(metadata);
+  } catch (error) {
+    console.warn('Failed to parse DTMF metadata payload:', error.message);
+    return { raw: metadata };
+  }
+}
+
+function formatDtmfEntries(entries = []) {
+  const revealRaw = shouldRevealRawDigits();
+  return entries.map((entry) => {
+    const stageKey = normalizeStage(entry.stage_key || 'generic');
+    const metadata = parseDtmfMetadata(entry.metadata);
+    const stageDefinition = getStageDefinition(stageKey);
+    const decrypted = entry.encrypted_digits ? decryptDigits(entry.encrypted_digits) : null;
+    const rawDigits = revealRaw ? decrypted : null;
+    return {
+      id: entry.id,
+      call_sid: entry.call_sid,
+      stage_key: stageKey,
+      label: stageDefinition.label,
+      digits: rawDigits || entry.masked_digits,
+      raw_digits: rawDigits || null,
+      masked_digits: entry.masked_digits,
+      received_at: entry.received_at,
+      compliance_mode: entry.compliance_mode,
+      provider: entry.provider,
+      metadata,
+    };
+  });
+}
 
 class EnhancedWebhookService {
   constructor() {
@@ -302,7 +348,9 @@ class EnhancedWebhookService {
     try {
       const callDetails = await this.db.getCall(call_sid);
       const transcripts = await this.db.getCallTranscripts(call_sid);
-      const dtmfInputs = await this.db.getCallDtmfInputs(call_sid);
+      const dtmfEntries = await this.db.getCallDtmfEntries(call_sid);
+      const formattedDtmf = formatDtmfEntries(dtmfEntries);
+      const dtmfSummary = dtmfEntries.length ? formatSummary(dtmfEntries) : { summaryLines: [], containsRaw: false };
       
       if (!callDetails || !transcripts || transcripts.length === 0) {
         await this.sendTelegramMessage(telegram_chat_id, '📋 No transcript available for this call');
@@ -332,15 +380,30 @@ class EnhancedWebhookService {
         sections.push(`<b>Status:</b> ${statusEmoji} ${this.escapeHtml(callDetails.status)}`);
       }
 
-      if (dtmfInputs && dtmfInputs.length > 0) {
-        const keypadLines = dtmfInputs.map((input, index) => {
-          const timestamp = input.received_at ? new Date(input.received_at).toLocaleTimeString() : null;
-          const timeSuffix = timestamp ? ` <i>(${this.escapeHtml(timestamp)})</i>` : '';
-          return `&#8226; <code>${this.escapeHtml(input.digits)}</code>${timeSuffix}`;
-        });
+      if (formattedDtmf.length > 0) {
+        const keypadLines = dtmfSummary.summaryLines.map((line) => `&#8226; ${this.escapeHtml(line)}`);
+        const latestEntry = formattedDtmf[formattedDtmf.length - 1];
+        const timestamp = latestEntry?.received_at ? new Date(latestEntry.received_at).toLocaleTimeString() : null;
+        const metadata = latestEntry?.metadata || {};
+        const providerLabel = (metadata.source || latestEntry?.provider || 'unknown').toString().toUpperCase();
+
         sections.push('');
         sections.push('<b>Keypad Entries:</b>');
         sections.push(keypadLines.join('<br>'));
+        const notes = [];
+        notes.push(`Entries captured: ${formattedDtmf.length}`);
+        if (timestamp) {
+          notes.push(`Last updated ${timestamp}`);
+        }
+        if (providerLabel) {
+          notes.push(`Source: ${providerLabel}`);
+        }
+        sections.push(`<i>${notes.map((note) => this.escapeHtml(note)).join(' • ')}</i>`);
+        sections.push(
+          dtmfSummary.containsRaw
+            ? '<i>🚧 Dev compliance mode — raw digits displayed.</i>'
+            : '<i>Digits masked per active compliance policy.</i>'
+        );
       }
 
       sections.push('');
@@ -352,7 +415,8 @@ class EnhancedWebhookService {
         const speakerLabel = entry.speaker === 'user' ? '👤 <b>Customer</b>' : '🤖 <b>AI</b>';
         const timestamp = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : null;
         const timeLine = timestamp ? ` <i>(${this.escapeHtml(timestamp)})</i>` : '';
-        const formattedMessage = this.formatHtmlLines(entry.message || '');
+        const messageText = entry.clean_message || entry.message || entry.raw_message || '';
+        const formattedMessage = this.formatHtmlLines(messageText);
         sections.push(`${speakerLabel}${timeLine}: ${formattedMessage}`);
       }
 
@@ -407,28 +471,50 @@ class EnhancedWebhookService {
 
   async sendCallInputNotification(call_sid, telegram_chat_id) {
     try {
-      const latestInput = await this.db.getLatestCallDtmfInput(call_sid);
+      const entries = await this.db.getCallDtmfEntries(call_sid);
 
-      if (!latestInput) {
-        await this.sendTelegramMessage(telegram_chat_id, '🔢 Keypad entry detected but no digits were recorded.');
+      if (!entries || entries.length === 0) {
+        await this.sendTelegramMessage(
+          telegram_chat_id,
+          '🔢 Keypad entry notification received but no digits were captured.',
+          'HTML'
+        );
         return true;
       }
 
-      const timestamp = latestInput.received_at ? new Date(latestInput.received_at).toLocaleTimeString() : null;
-      const sourceLabel = latestInput.source ? latestInput.source.toUpperCase() : 'UNKNOWN';
+      const formattedEntries = formatDtmfEntries(entries);
+      const { summaryLines, containsRaw } = formatSummary(entries);
+      const latestEntry = formattedEntries[formattedEntries.length - 1];
+      const timestamp = latestEntry?.received_at ? new Date(latestEntry.received_at).toLocaleTimeString() : null;
+      const metadata = latestEntry?.metadata || {};
+      const sourceLabel = (metadata.source || latestEntry?.provider || 'unknown').toString().toUpperCase();
 
       const sections = [];
-      sections.push('🔢 <b>Keypad Entry Captured</b>');
+      sections.push(
+        containsRaw ? '⚠️ <b>Keypad Digits Captured</b>' : '🔢 <b>Keypad Digits Captured</b>'
+      );
       sections.push('');
-      sections.push(`<b>Digits:</b> <code>${this.escapeHtml(latestInput.digits)}</code>`);
 
-      if (timestamp) {
-        sections.push(`<b>Received:</b> ${this.escapeHtml(timestamp)}`);
+      if (summaryLines.length > 0) {
+        const bulletLines = summaryLines.map((line) => `&#8226; ${this.escapeHtml(line)}`);
+        sections.push(bulletLines.join('<br>'));
+        sections.push('');
       }
 
-      sections.push(`<b>Source:</b> ${this.escapeHtml(sourceLabel)}`);
-      sections.push('');
-      sections.push('<i>The customer entered these digits on their phone keypad during the call.</i>');
+      const details = [];
+      details.push(`Entries captured: ${formattedEntries.length}`);
+      if (timestamp) {
+        details.push(`Last updated ${timestamp}`);
+      }
+      if (sourceLabel) {
+        details.push(`Source: ${sourceLabel}`);
+      }
+      sections.push(`<b>Details:</b> ${this.escapeHtml(details.join(' • '))}`);
+      sections.push(
+        containsRaw
+          ? '<i>🚧 Dev compliance mode — raw digits displayed. Handle with care.</i>'
+          : '<i>Digits masked per active compliance policy.</i>'
+      );
 
       await this.sendTelegramMessage(telegram_chat_id, sections.join('<br>'), 'HTML');
 
