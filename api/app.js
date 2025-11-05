@@ -3383,10 +3383,16 @@ function normalizeTemplatePayload(body) {
         }
     }
 
+    let canonicalBusinessId = null;
+    if (business_id) {
+        const profile = getBusinessProfile(business_id);
+        canonicalBusinessId = profile ? profile.id : business_id;
+    }
+
     return {
         name,
         description,
-        business_id,
+        business_id: canonicalBusinessId,
         prompt,
         first_message,
         voice_model: cleanVoiceModel,
