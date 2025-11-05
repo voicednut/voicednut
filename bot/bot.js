@@ -126,6 +126,13 @@ const { smsFlow, bulkSmsFlow, scheduleSmsFlow, registerSmsCommands } = require('
 const { templatesFlow, registerTemplatesCommand } = require('./commands/templates');
 const { personaFlow, registerPersonaCommand } = require('./commands/persona');
 const {
+    registerProviderCommand,
+    fetchProviderStatus,
+    formatProviderStatus,
+    updateProvider,
+    SUPPORTED_PROVIDERS,
+} = require('./commands/provider');
+const {
     addUserFlow,
     registerAddUserCommand,
     promoteFlow,
@@ -163,7 +170,7 @@ require('./commands/menu')(bot);
 require('./commands/guide')(bot);
 require('./commands/transcript')(bot);
 require('./commands/api')(bot);
-require('./commands/provider')(bot);
+registerProviderCommand(bot);
 require('./commands/webapp')(bot); // Register WebApp handler
 
 function escapeMarkdown(text = '') {
@@ -477,9 +484,12 @@ bot.on('callback_query:data', async (ctx) => {
 
         // Check admin permissions
         const isAdminUser = user.role === 'ADMIN';
-        const adminActions = ['ADDUSER', 'PROMOTE', 'REMOVE', 'USERS', 'STATUS', 'TEST_API', 'TEMPLATES', 'SMS_STATS'];
-        
-        if (adminActions.includes(action) && !isAdminUser) {
+        const adminActions = ['ADDUSER', 'PROMOTE', 'REMOVE', 'USERS', 'STATUS', 'TEST_API', 'TEMPLATES', 'SMS_STATS', 'PROVIDER_STATUS'];
+        const adminActionPrefixes = ['PROVIDER_SET:'];
+
+        const requiresAdmin = adminActions.includes(action) || adminActionPrefixes.some((prefix) => action.startsWith(prefix));
+
+        if (requiresAdmin && !isAdminUser) {
             await ctx.reply("❌ This action is for administrators only.");
             return;
         }
@@ -497,6 +507,14 @@ bot.on('callback_query:data', async (ctx) => {
             resetSession(ctx);
             const [, phone, followAction] = action.split(':');
             await handleSmsFollowUp(ctx, phone, followAction || 'new');
+            return;
+        }
+
+        if (action.startsWith('PROVIDER_SET:')) {
+            const [, provider] = action.split(':');
+            await cancelActiveFlow(ctx, `callback:${action}`);
+            resetSession(ctx);
+            await executeProviderSwitchCommand(ctx, provider?.toLowerCase());
             return;
         }
 
@@ -560,13 +578,19 @@ bot.on('callback_query:data', async (ctx) => {
                     await executeStatusCommand(ctx);
                 }
                 break;
-                
+
             case 'TEST_API':
                 if (isAdminUser) {
                     await executeTestApiCommand(ctx);
                 }
                 break;
-                
+
+            case 'PROVIDER_STATUS':
+                if (isAdminUser) {
+                    await executeProviderStatusCommand(ctx);
+                }
+                break;
+
             case 'CALLS':
                 await executeCallsCommand(ctx);
                 break;
@@ -639,6 +663,7 @@ async function executeHelpCommand(ctx) {
 • /users - List all authorized users
 • /bulksms - Send bulk SMS messages
 • /schedulesms - Schedule SMS for later
+• /provider - View or switch call provider
 • /smsstats - View SMS statistics
 • /templates - Manage call &amp; SMS templates
 • /status - Full system status check
@@ -675,7 +700,9 @@ async function executeHelpCommand(ctx) {
         if (isOwner) {
             kb.row()
             .text('👥 Users', 'USERS')
-            .text('➕ Add User', 'ADDUSER');
+            .text('➕ Add User', 'ADDUSER')
+            .row()
+            .text('☎️ Provider', 'PROVIDER_STATUS');
         }
         
         await ctx.reply(helpText, {
@@ -781,12 +808,10 @@ async function executeMenuCommand(ctx, isAdminUser) {
         .text('📱 Send SMS', 'SMS')
         .row()
         .text('📋 Recent Calls', 'CALLS')
-        .text('💬 SMS Stats', 'SMS_STATS')
+        .text('📚 Guide', 'GUIDE')
         .row()
         .text('🏥 Health Check', 'HEALTH')
-        .text('ℹ️ Help', 'HELP')
-        .row()
-        .text('📚 Guide', 'GUIDE');
+        .text('ℹ️ Help', 'HELP');
 
     if (isAdminUser) {
         kb.row()
@@ -798,6 +823,11 @@ async function executeMenuCommand(ctx, isAdminUser) {
             .row()
             .text('👥 Users', 'USERS')
             .text('❌ Remove', 'REMOVE')
+            .row()
+            .text('🧰 Templates', 'TEMPLATES')
+            .text('📊 SMS Stats', 'SMS_STATS')
+            .row()
+            .text('☎️ Provider', 'PROVIDER_STATUS')
             .row()
             .text('🔍 Status', 'STATUS')
             .text('🧪 Test API', 'TEST_API');
@@ -898,7 +928,7 @@ async function executeTestApiCommand(ctx) {
 
 async function executeCallsCommand(ctx) {
     const axios = require('axios');
-    
+
     try {
         console.log('Executing calls command via callback...');
         
@@ -1012,6 +1042,89 @@ async function executeCallsCommand(ctx) {
     }
 }
 
+function buildProviderKeyboard(activeProvider = '') {
+    const keyboard = new InlineKeyboard();
+    SUPPORTED_PROVIDERS.forEach((provider, index) => {
+        const normalized = provider.toLowerCase();
+        const isActive = normalized === activeProvider;
+        const label = isActive ? `✅ ${normalized.toUpperCase()}` : normalized.toUpperCase();
+        keyboard.text(label, `PROVIDER_SET:${normalized}`);
+
+        const shouldInsertRow = index % 2 === 1 && index < SUPPORTED_PROVIDERS.length - 1;
+        if (shouldInsertRow) {
+            keyboard.row();
+        }
+    });
+
+    keyboard.row().text('🔄 Refresh', 'PROVIDER_STATUS');
+    return keyboard;
+}
+
+async function executeProviderStatusCommand(ctx) {
+    try {
+        const status = await fetchProviderStatus();
+        const active = (status.provider || '').toLowerCase();
+        const keyboard = buildProviderKeyboard(active);
+
+        let message = formatProviderStatus(status);
+        message += '\n\nTap a provider below to switch.';
+
+        await ctx.reply(message, {
+            parse_mode: 'Markdown',
+            reply_markup: keyboard,
+        });
+    } catch (error) {
+        console.error('Provider status command error:', error);
+        if (error.response) {
+            const details = error.response.data?.details || error.response.data?.error || error.response.statusText;
+            await ctx.reply(`❌ Failed to fetch provider status: ${details || 'Unknown error'}`);
+        } else if (error.request) {
+            await ctx.reply('❌ No response from provider API. Please check the server.');
+        } else {
+            await ctx.reply(`❌ Error fetching provider status: ${error.message}`);
+        }
+    }
+}
+
+async function executeProviderSwitchCommand(ctx, provider) {
+    const normalized = (provider || '').trim().toLowerCase();
+    if (!normalized || !SUPPORTED_PROVIDERS.includes(normalized)) {
+        await ctx.reply('❌ Unsupported provider selection.');
+        return;
+    }
+
+    try {
+        const result = await updateProvider(normalized);
+        const status = await fetchProviderStatus();
+        const active = (status.provider || '').toLowerCase();
+        const keyboard = buildProviderKeyboard(active);
+
+        const targetLabel = active ? active.toUpperCase() : normalized.toUpperCase();
+        let message = result.changed === false
+            ? `ℹ️ Provider already set to *${targetLabel}*.`
+            : `✅ Call provider set to *${targetLabel}*.`;
+
+        message += '\n\n';
+        message += formatProviderStatus(status);
+        message += '\n\nTap a provider below to switch again.';
+
+        await ctx.reply(message, {
+            parse_mode: 'Markdown',
+            reply_markup: keyboard,
+        });
+    } catch (error) {
+        console.error('Provider switch command error:', error);
+        if (error.response) {
+            const details = error.response.data?.details || error.response.data?.error || error.response.statusText;
+            await ctx.reply(`❌ Failed to update provider: ${details || 'Unknown error'}`);
+        } else if (error.request) {
+            await ctx.reply('❌ No response from provider API. Please check the server.');
+        } else {
+            await ctx.reply(`❌ Error switching provider: ${error.message}`);
+        }
+    }
+}
+
 // Mini App command handler
 bot.command('miniapp', async (ctx) => {
     try {
@@ -1064,6 +1177,7 @@ bot.api.setMyCommands([
     { command: 'health', description: 'Check bot and API health' },
     { command: 'bulksms', description: 'Send bulk SMS (admin only)' },
     { command: 'schedulesms', description: 'Schedule SMS message' },
+    { command: 'provider', description: 'Manage call provider (admin only)' },
     { command: 'smsstats', description: 'SMS statistics (admin only)' },
     { command: 'templates', description: 'Manage call & SMS templates (admin only)' },
     { command: 'adduser', description: 'Add user (admin only)' },

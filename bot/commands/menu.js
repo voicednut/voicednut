@@ -47,6 +47,8 @@ module.exports = (bot) => {
                     .text('🧰 Templates', 'TEMPLATES')
                     .text('📊 SMS Stats', 'SMS_STATS')
                     .row()
+                    .text('☎️ Provider', 'PROVIDER_STATUS')
+                    .row()
                     .text('🔍 Status', 'STATUS')
                     .text('🧪 Test API', 'TEST_API');
             }

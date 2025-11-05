@@ -39,6 +39,7 @@ module.exports = (bot) => {
 • /schedulesms - Schedule SMS for later
 • /templates - Manage call &amp; SMS templates
 • /persona - Manage adaptive personas
+• /provider - View or switch call provider
 • /smsstats - View SMS statistics
 • /status - Full system status check
 • /testapi - Test API connection`;
@@ -74,7 +75,9 @@ module.exports = (bot) => {
             if (isOwner) {
                 kb.row()
                     .text('👥 Users', 'USERS')
-                    .text('➕ Add User', 'ADDUSER');
+                    .text('➕ Add User', 'ADDUSER')
+                    .row()
+                    .text('☎️ Provider', 'PROVIDER_STATUS');
             }
 
             await ctx.reply(helpText, {
