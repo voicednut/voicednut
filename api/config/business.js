@@ -9,6 +9,14 @@ const sharedPromptSuffix = [
   'Always add a \'•\' symbol every 5 to 10 words for speech streaming unless communicating via SMS or alerts.'
 ].join(' ');
 
+const BUSINESS_ALIASES = {
+  finance: 'finance_alerts',
+  'finance-alerts': 'finance_alerts',
+  financealerts: 'finance_alerts',
+  'financial-services': 'finance_alerts',
+  finance_security: 'finance_alerts',
+};
+
 const businessProfiles = {
   dental_clinic: {
     id: 'dental_clinic',
@@ -267,7 +275,17 @@ const businessProfiles = {
 };
 
 function getBusinessProfile(id) {
-  return businessProfiles[id] || null;
+  if (!id) {
+    return null;
+  }
+
+  const normalized = id.toString().trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  const aliasTarget = BUSINESS_ALIASES[normalized] || normalized;
+  return businessProfiles[aliasTarget] || null;
 }
 
 function listBusinessProfiles() {
@@ -277,6 +295,7 @@ function listBusinessProfiles() {
 module.exports = {
   BUSINESS_DEFAULTS,
   businessProfiles,
+  BUSINESS_ALIASES,
   getBusinessProfile,
   listBusinessProfiles
 };

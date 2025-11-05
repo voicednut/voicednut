@@ -955,12 +955,17 @@ async function listCallTemplatesFlow(conversation, ctx, ensureActive) {
   try {
     const templates = await fetchCallTemplates();
     safeEnsureActive();
-    if (!templates.length) {
+    const validTemplates = (templates || []).filter((template) => template && typeof template.id !== 'undefined' && template.id !== null);
+
+    if (!validTemplates.length) {
+      if (templates && templates.length && templates.some((t) => !t || typeof t.id === 'undefined')) {
+        console.warn('Template list contained invalid entries, ignoring malformed records.');
+      }
       await ctx.reply('ℹ️ No call templates found. Use the create action to add one.');
       return;
     }
 
-    const summaryLines = templates.slice(0, 15).map((template, index) => {
+    const summaryLines = validTemplates.slice(0, 15).map((template, index) => {
       const parts = [`${index + 1}. ${template.name}`];
       if (template.description) {
         parts.push(`– ${template.description}`);
@@ -970,14 +975,14 @@ async function listCallTemplatesFlow(conversation, ctx, ensureActive) {
 
     let message = '☎️ Call Templates\n\n';
     message += summaryLines.join('\n');
-    if (templates.length > 15) {
-      message += `\n… and ${templates.length - 15} more.`;
+    if (validTemplates.length > 15) {
+      message += `\n… and ${validTemplates.length - 15} more.`;
     }
     message += '\n\nSelect a template below to view details.';
 
     await ctx.reply(message);
 
-    const options = templates.map((template) => ({
+    const options = validTemplates.map((template) => ({
       id: template.id.toString(),
       label: `📄 ${template.name}`
     }));
