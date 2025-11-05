@@ -8,13 +8,15 @@ class OperationCancelledError extends Error {
 }
 
 class FlowContext {
-  constructor(name, ttlMs = 10 * 60 * 1000) {
+  constructor(name, ttlMs = 10 * 60 * 1000, seed = {}) {
     this.name = name;
     this.ttlMs = ttlMs;
-    this.createdAt = Date.now();
-    this.updatedAt = this.createdAt;
-    this.step = null;
-    this.state = {};
+    const created = typeof seed.createdAt === 'number' ? seed.createdAt : Date.now();
+    const updated = typeof seed.updatedAt === 'number' ? seed.updatedAt : created;
+    this.createdAt = created;
+    this.updatedAt = updated;
+    this.step = seed.step || null;
+    this.state = seed.state || {};
   }
 
   get expired() {
@@ -30,8 +32,9 @@ class FlowContext {
 
   reset(name = this.name) {
     this.name = name;
-    this.createdAt = Date.now();
-    this.updatedAt = this.createdAt;
+    const now = Date.now();
+    this.createdAt = now;
+    this.updatedAt = now;
     this.step = null;
     this.state = {};
   }
@@ -142,12 +145,31 @@ function ensureOperationActive(ctx, opId) {
 function ensureFlow(ctx, name, options = {}) {
   ensureSession(ctx);
   const ttlMs = typeof options.ttlMs === 'number' && options.ttlMs > 0 ? options.ttlMs : 10 * 60 * 1000;
-  if (!ctx.session.flow || ctx.session.flow.name !== name || ctx.session.flow.expired) {
-    ctx.session.flow = new FlowContext(name, ttlMs);
-  } else {
-    ctx.session.flow.touch(options.step || null);
+  const step = options.step || null;
+
+  let flow = ctx.session.flow;
+
+  const needsRehydrate =
+    flow &&
+    (typeof flow !== 'object' ||
+      typeof flow.touch !== 'function' ||
+      typeof flow.reset !== 'function' ||
+      typeof flow.expired !== 'boolean'); // calling getter converts to boolean
+
+  if (!flow || flow.name !== name || needsRehydrate) {
+    const seed = flow && typeof flow === 'object' ? flow : {};
+    flow = new FlowContext(name, ttlMs, seed);
+  } else if (typeof flow.ttlMs !== 'number' || flow.ttlMs !== ttlMs) {
+    flow.ttlMs = ttlMs;
   }
-  return ctx.session.flow;
+
+  if (flow.expired) {
+    flow.reset(name);
+  }
+
+  flow.touch(step);
+  ctx.session.flow = flow;
+  return flow;
 }
 
 async function safeReset(ctx, reason = 'reset', options = {}) {
