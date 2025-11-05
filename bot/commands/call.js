@@ -17,7 +17,8 @@ const {
   registerAbortController,
   OperationCancelledError,
   ensureFlow,
-  safeReset
+  safeReset,
+  guardAgainstCommandInterrupt
 } = require('../utils/sessionState');
 
 const templatesApiBase = config.templatesApiUrl.replace(/\/+$/, '');
@@ -78,6 +79,9 @@ async function collectPlaceholderValues(conversation, ctx, placeholders, ensureA
     const update = await conversation.wait();
     ensureActive();
     const text = update?.message?.text?.trim();
+    if (text) {
+      await guardAgainstCommandInterrupt(ctx, text);
+    }
     if (!text || text.toLowerCase() === 'skip') {
       continue;
     }
@@ -241,6 +245,9 @@ async function buildCustomCallConfig(conversation, ctx, ensureActive, businessOp
     const promptMsg = await conversation.wait();
     ensureActive();
     const prompt = promptMsg?.message?.text?.trim();
+    if (prompt) {
+      await guardAgainstCommandInterrupt(ctx, prompt);
+    }
     if (!prompt) {
       await ctx.reply('❌ Please provide a valid prompt.');
       return null;
@@ -250,6 +257,9 @@ async function buildCustomCallConfig(conversation, ctx, ensureActive, businessOp
     const firstMsg = await conversation.wait();
     ensureActive();
     const firstMessage = firstMsg?.message?.text?.trim();
+    if (firstMessage) {
+      await guardAgainstCommandInterrupt(ctx, firstMessage);
+    }
     if (!firstMessage) {
       await ctx.reply('❌ Please provide a valid first message.');
       return null;
@@ -358,6 +368,10 @@ async function callFlow(conversation, ctx) {
   const waitForMessage = async () => {
     const update = await conversation.wait();
     ensureActive();
+    const text = update?.message?.text?.trim();
+    if (text) {
+      await guardAgainstCommandInterrupt(ctx, text);
+    }
     return update;
   };
 

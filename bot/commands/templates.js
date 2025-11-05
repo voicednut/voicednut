@@ -16,7 +16,8 @@ const {
   startOperation,
   ensureOperationActive,
   OperationCancelledError,
-  getCurrentOpId
+  getCurrentOpId,
+  guardAgainstCommandInterrupt
 } = require('../utils/sessionState');
 
 const templatesApi = axios.create({
@@ -168,6 +169,9 @@ async function promptText(
   const response = await conversation.wait();
   safeEnsureActive();
   const text = response?.message?.text?.trim();
+  if (text) {
+    await guardAgainstCommandInterrupt(ctx, text);
+  }
 
   if (!text) {
     if (allowEmpty) {
@@ -222,6 +226,9 @@ async function collectPlaceholderValues(conversation, ctx, placeholders, ensureA
     const response = await conversation.wait();
     safeEnsureActive();
     const text = response?.message?.text?.trim();
+    if (text) {
+      await guardAgainstCommandInterrupt(ctx, text);
+    }
     if (!text) {
       continue;
     }

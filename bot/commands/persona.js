@@ -6,7 +6,8 @@ const {
   ensureOperationActive,
   registerAbortController,
   OperationCancelledError,
-  getCurrentOpId
+  getCurrentOpId,
+  guardAgainstCommandInterrupt
 } = require('../utils/sessionState');
 const {
   askOptionWithButtons,
@@ -116,6 +117,9 @@ async function promptForText(conversation, ctx, message, options = {}) {
   safeEnsureActive();
 
   const text = update?.message?.text?.trim();
+  if (text) {
+    await guardAgainstCommandInterrupt(ctx, text);
+  }
   if (!text) {
     if (required) {
       await ctx.reply('❌ Please provide a response or type cancel.');
