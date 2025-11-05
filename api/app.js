@@ -85,6 +85,8 @@ const personaComposer = new PersonaComposer();
 const awsCallSessions = new Map();
 const awsContactIndex = new Map();
 const vonageCallIndex = new Map();
+const callDtmfBuffers = new Map();
+const DTMF_FLUSH_DELAY_MS = 1500;
 let awsAdapters = null;
 let vonageAdapters = null;
 
@@ -493,7 +495,61 @@ app.ws('/connection', (ws) => {
     let marks = [];
     let interactionCount = 0;
     let isInitialized = false;
-  
+
+    const recordDtmfInput = async (digits, source = 'twilio', extraMeta = {}) => {
+      if (!callSid) {
+        return;
+      }
+
+      const sanitizedDigits = String(digits || '').replace(/[^0-9*#]/g, '');
+      if (!sanitizedDigits) {
+        return;
+      }
+
+      try {
+        const metadataPayload = {
+          ...extraMeta,
+          source,
+          provider: currentProvider,
+          digit_count: sanitizedDigits.length,
+          captured_at: new Date().toISOString()
+        };
+
+        await db.addCallDtmfInput({
+          call_sid: callSid,
+          digits: sanitizedDigits,
+          source,
+          metadata: JSON.stringify(metadataPayload)
+        });
+
+        await db.updateCallState(callSid, 'dtmf_captured', {
+          digits: sanitizedDigits,
+          source,
+          metadata: metadataPayload
+        });
+
+        const callRecord = await db.getCall(callSid);
+        if (callRecord?.user_chat_id) {
+          await db.createEnhancedWebhookNotification(
+            callSid,
+            'call_input_dtmf',
+            callRecord.user_chat_id,
+            'high'
+          );
+        }
+
+        await db.logServiceHealth('call_system', 'dtmf_captured', {
+          call_sid: callSid,
+          digits_length: sanitizedDigits.length,
+          source
+        });
+
+        console.log(`🔢 Captured DTMF input for ${callSid}: ${sanitizedDigits}`.cyan);
+      } catch (error) {
+        console.error('❌ Failed to persist DTMF input:', error);
+      }
+    };
+
     ws.on('message', async function message(data) {
       try {
         const msg = JSON.parse(data);
@@ -666,6 +722,80 @@ app.ws('/connection', (ws) => {
             }
           }
 
+        } else if (msg.event === 'dtmf') {
+          if (!callSid) {
+            return;
+          }
+
+          try {
+            const dtmfInfo = msg.dtmf || {};
+            const rawDigits = dtmfInfo.digits ?? dtmfInfo.digit ?? msg.digits ?? msg.digit ?? '';
+            const source = dtmfInfo.source || dtmfInfo.direction || 'twilio';
+            const buffer = callDtmfBuffers.get(callSid) || { digits: '', lastRaw: '', timer: null };
+            callDtmfBuffers.set(callSid, buffer);
+
+            if (buffer.timer) {
+              clearTimeout(buffer.timer);
+              buffer.timer = null;
+            }
+
+            const normalizedRaw = typeof rawDigits === 'string'
+              ? rawDigits.trim()
+              : typeof rawDigits === 'number'
+                ? String(rawDigits)
+                : '';
+            const sanitized = normalizedRaw.replace(/[^0-9*#]/g, '');
+            const containsTerminator = /#/.test(normalizedRaw) || normalizedRaw.toLowerCase() === 'finish';
+
+            if (sanitized) {
+              if (!buffer.digits) {
+                buffer.digits = sanitized.replace(/#/g, '');
+              } else if (sanitized.length === 1 && sanitized !== '#') {
+                buffer.digits += sanitized;
+              } else if (sanitized.startsWith(buffer.digits)) {
+                const suffix = sanitized.slice(buffer.digits.length).replace(/#/g, '');
+                buffer.digits += suffix;
+              } else {
+                buffer.digits = sanitized.replace(/#/g, '');
+              }
+            }
+
+            buffer.lastRaw = normalizedRaw;
+
+            const finished = containsTerminator || dtmfInfo.finished === true || dtmfInfo.complete === true || dtmfInfo.terminator === true || msg.finished === true;
+
+            const flushBuffer = async (reason) => {
+              if (!buffer.digits) {
+                return;
+              }
+
+              const digitsToPersist = buffer.digits;
+              if (buffer.timer) {
+                clearTimeout(buffer.timer);
+                buffer.timer = null;
+              }
+              callDtmfBuffers.delete(callSid);
+
+              await recordDtmfInput(digitsToPersist, source, {
+                dtmf: dtmfInfo,
+                reason,
+                finished: reason === 'terminator'
+              });
+            };
+
+            if (finished) {
+              await flushBuffer('terminator');
+            } else {
+              buffer.timer = setTimeout(() => {
+                flushBuffer('timeout').catch((error) => {
+                  console.error('❌ Failed to persist buffered DTMF digits:', error);
+                });
+              }, DTMF_FLUSH_DELAY_MS);
+              callDtmfBuffers.set(callSid, buffer);
+            }
+          } catch (dtmfError) {
+            console.error('❌ Error handling DTMF input:', dtmfError);
+          }
         } else if (msg.event === 'media') {
           if (isInitialized && transcriptionService) {
             transcriptionService.send(msg.media.payload);
@@ -675,7 +805,15 @@ app.ws('/connection', (ws) => {
           marks = marks.filter(m => m !== msg.mark.name);
         } else if (msg.event === 'stop') {
           console.log(`🔚 Adaptive call stream ${streamSid} ended`.red);
-          
+          const pendingDigits = callDtmfBuffers.get(callSid);
+          if (pendingDigits?.timer) {
+            clearTimeout(pendingDigits.timer);
+          }
+          if (pendingDigits?.digits) {
+            await recordDtmfInput(pendingDigits.digits, 'twilio', { finished: false, reason: 'stream_stopped' });
+          }
+          callDtmfBuffers.delete(callSid);
+
           await handleCallEnd(callSid, callStartTime);
           
           // Clean up
@@ -752,6 +890,18 @@ app.ws('/connection', (ws) => {
         }
       }
 
+      const pendingDigits = callSid ? callDtmfBuffers.get(callSid) : undefined;
+      if (pendingDigits?.timer) {
+        clearTimeout(pendingDigits.timer);
+      }
+      if (pendingDigits?.digits) {
+        recordDtmfInput(pendingDigits.digits, 'twilio', { finished: false, reason: 'socket_closed' })
+          .catch((error) => console.error('❌ Failed to persist buffered DTMF digits on close:', error));
+      }
+      if (callSid) {
+        callDtmfBuffers.delete(callSid);
+      }
+
       const session = callSid ? activeCalls.get(callSid) : undefined;
       if (callSid && session) {
         activeCalls.delete(callSid);
@@ -773,7 +923,23 @@ async function handleCallEnd(callSid, callStartTime) {
     const callEndTime = new Date();
     const duration = Math.round((callEndTime - callStartTime) / 1000);
 
+    const callDetails = await db.getCall(callSid);
     const transcripts = await db.getCallTranscripts(callSid);
+    const dtmfInputs = await db.getCallDtmfInputs(callSid);
+
+    if (callDetails) {
+      if (callDetails.business_context) {
+        try {
+          callDetails.business_context = JSON.parse(callDetails.business_context);
+        } catch (contextError) {
+          console.warn('Failed to parse business context for call', callSid, contextError.message);
+        }
+      }
+
+      callDetails.dtmf_input_count = dtmfInputs.length;
+      callDetails.latest_dtmf_digits = dtmfInputs.length ? dtmfInputs[dtmfInputs.length - 1].digits : null;
+    }
+
     const summary = generateCallSummary(transcripts, duration);
     
     // Get personality adaptation data
@@ -804,8 +970,6 @@ async function handleCallEnd(callSid, callStartTime) {
       personality_adaptations: adaptationAnalysis.personalityChanges || 0
     });
 
-    const callDetails = await db.getCall(callSid);
-    
     // Create enhanced webhook notification for completion
     if (callDetails && callDetails.user_chat_id) {
       await db.createEnhancedWebhookNotification(callSid, 'call_completed', callDetails.user_chat_id);
@@ -1608,7 +1772,17 @@ app.get('/api/calls/:callSid', async (req, res) => {
     }
 
     const transcripts = await db.getCallTranscripts(callSid);
-    
+    const dtmfInputs = await db.getCallDtmfInputs(callSid);
+
+    let businessContext = null;
+    if (call.business_context) {
+      try {
+        businessContext = JSON.parse(call.business_context);
+      } catch (contextError) {
+        console.warn('Failed to parse business context for call detail response:', contextError.message);
+      }
+    }
+
     // Parse adaptation data
     let adaptationData = {};
     try {
@@ -1635,9 +1809,10 @@ app.get('/api/calls/:callSid', async (req, res) => {
     res.json({
       call,
       transcripts,
+      dtmf_inputs: dtmfInputs,
       transcript_count: transcripts.length,
       adaptation_analytics: adaptationData,
-      business_context: call.business_context ? JSON.parse(call.business_context) : null,
+      business_context: businessContext,
       webhook_notifications: webhookNotifications,
       enhanced_features: true
     });
@@ -2069,6 +2244,8 @@ app.get('/api/calls', async (req, res) => {
     const formattedCalls = calls.map(call => ({
       ...call,
       transcript_count: call.transcript_count || 0,
+      dtmf_input_count: call.dtmf_input_count || 0,
+      has_dtmf_input: (call.dtmf_input_count || 0) > 0,
       created_date: new Date(call.created_at).toLocaleDateString(),
       duration_formatted: call.duration ? 
         `${Math.floor(call.duration/60)}:${String(call.duration%60).padStart(2,'0')}` : 
@@ -2147,12 +2324,14 @@ app.get('/api/calls/list', async (req, res) => {
     const query = `
       SELECT 
         c.*,
-        COUNT(t.id) as transcript_count,
+        COUNT(DISTINCT t.id) as transcript_count,
+        COUNT(DISTINCT d.id) as dtmf_input_count,
         GROUP_CONCAT(DISTINCT t.speaker) as speakers,
         MIN(t.timestamp) as conversation_start,
         MAX(t.timestamp) as conversation_end
       FROM calls c
       LEFT JOIN transcripts t ON c.call_sid = t.call_sid
+      LEFT JOIN call_dtmf_inputs d ON c.call_sid = d.call_sid
       ${whereClause}
       GROUP BY c.call_sid
       ORDER BY c.created_at DESC
@@ -2201,6 +2380,8 @@ app.get('/api/calls/list', async (req, res) => {
         ended_at: call.ended_at,
         duration: call.duration,
         transcript_count: call.transcript_count || 0,
+        dtmf_input_count: call.dtmf_input_count || 0,
+        has_dtmf_input: (call.dtmf_input_count || 0) > 0,
         has_conversation: hasConversation,
         conversation_duration: conversationDuration,
         call_summary: call.call_summary,
