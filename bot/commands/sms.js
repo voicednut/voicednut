@@ -8,7 +8,7 @@ const {
     OperationCancelledError
 } = require('../utils/sessionState');
 const {
-    BUSINESS_OPTIONS,
+    getBusinessOptions,
     MOOD_OPTIONS,
     URGENCY_OPTIONS,
     TECH_LEVEL_OPTIONS,
@@ -37,17 +37,6 @@ async function smsFlow(conversation, ctx) {
         const update = await conversation.wait();
         ensureActive();
         return update;
-    };
-    const guardedPost = async (url, data, options = {}) => {
-        const controller = new AbortController();
-        const release = registerAbortController(ctx, controller);
-        try {
-            const response = await axios.post(url, data, { timeout: 120000, signal: controller.signal, ...options });
-            ensureActive();
-            return response;
-        } finally {
-            release();
-        }
     };
     const askWithGuard = async (...params) => {
         const result = await askOptionWithButtons(...params);
@@ -86,28 +75,45 @@ async function smsFlow(conversation, ctx) {
             return;
         }
 
-        await ctx.reply('📱 Enter phone number (E.164 format, e.g., +1234567890):');
+        const prefill = ctx.session.meta?.prefill || {};
+        let number = prefill.phoneNumber || null;
 
-        const numMsg = await waitForMessage();
-        const number = numMsg?.message?.text?.trim();
+        if (number) {
+            await ctx.reply(`📞 Using follow-up number: ${number}`);
+            if (ctx.session.meta) {
+                delete ctx.session.meta.prefill;
+            }
+        } else {
+            await ctx.reply('📱 Enter phone number (E.164 format, e.g., +1234567890):');
+            const numMsg = await waitForMessage();
+            number = numMsg?.message?.text?.trim();
 
-        if (!number) return ctx.reply('❌ Please provide a phone number.');
-        if (!isValidPhoneNumber(number)) {
-            return ctx.reply('❌ Invalid phone number format. Use E.164 format: +1234567890');
+            if (!number) return ctx.reply('❌ Please provide a phone number.');
+            if (!isValidPhoneNumber(number)) {
+                return ctx.reply('❌ Invalid phone number format. Use E.164 format: +1234567890');
+            }
         }
+
+        const businessOptions = await getBusinessOptions();
+        ensureActive();
 
         const selectedBusiness = await askWithGuard(
             conversation,
             ctx,
             `🎭 *Select SMS persona:*
 Choose the business profile for this message.`,
-            BUSINESS_OPTIONS,
+            businessOptions,
             {
                 prefix: 'sms-persona',
                 columns: 2,
                 formatLabel: (option) => option.custom ? '✍️ Custom Message' : option.label
             }
         );
+
+        if (!selectedBusiness) {
+            await ctx.reply('❌ Invalid persona selection. Please try again.');
+            return;
+        }
 
         const payload = {
             to: number,
@@ -549,12 +555,22 @@ async function scheduleSmsFlow(conversation, ctx) {
             return;
         }
 
-        await ctx.reply('📱 Enter phone number (E.164 format):');
-        const numMsg = await waitForMessage();
-        const number = numMsg?.message?.text?.trim();
+        const prefill = ctx.session.meta?.prefill || {};
+        let number = prefill.phoneNumber || null;
 
-        if (!number || !isValidPhoneNumber(number)) {
-            return ctx.reply('❌ Invalid phone number format. Use E.164 format: +1234567890');
+        if (number) {
+            await ctx.reply(`📞 Using follow-up number: ${number}`);
+            if (ctx.session.meta) {
+                delete ctx.session.meta.prefill;
+            }
+        } else {
+            await ctx.reply('📱 Enter phone number (E.164 format):');
+            const numMsg = await waitForMessage();
+            number = numMsg?.message?.text?.trim();
+
+            if (!number || !isValidPhoneNumber(number)) {
+                return ctx.reply('❌ Invalid phone number format. Use E.164 format: +1234567890');
+            }
         }
 
         await ctx.reply('💬 Enter the message:');

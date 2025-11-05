@@ -2,7 +2,8 @@ const axios = require('axios');
 const config = require('../config');
 const { getUser } = require('../db/db');
 const {
-  BUSINESS_OPTIONS,
+  getBusinessOptions,
+  findBusinessOption,
   MOOD_OPTIONS,
   URGENCY_OPTIONS,
   TECH_LEVEL_OPTIONS,
@@ -176,7 +177,7 @@ async function selectCallTemplate(conversation, ctx, ensureActive) {
   }
 
   if (template.business_id) {
-    const business = BUSINESS_OPTIONS.find((option) => option.id === template.business_id);
+    const business = findBusinessOption(template.business_id);
     summary.push(`Persona: ${business ? business.label : template.business_id}`);
   }
 
@@ -208,12 +209,13 @@ async function selectCallTemplate(conversation, ctx, ensureActive) {
   };
 }
 
-async function buildCustomCallConfig(conversation, ctx, ensureActive) {
+async function buildCustomCallConfig(conversation, ctx, ensureActive, businessOptions) {
+  const personaOptions = Array.isArray(businessOptions) && businessOptions.length ? businessOptions : await getBusinessOptions();
   const selectedBusiness = await askOptionWithButtons(
     conversation,
     ctx,
     '🎭 *Select service type / persona:*\nTap the option that best matches this call.',
-    BUSINESS_OPTIONS,
+    personaOptions,
     {
       prefix: 'persona',
       columns: 2,
@@ -221,6 +223,11 @@ async function buildCustomCallConfig(conversation, ctx, ensureActive) {
     }
   );
   ensureActive();
+
+  if (!selectedBusiness) {
+    await ctx.reply('❌ Invalid persona selection. Please try again.');
+    return null;
+  }
 
   const payloadUpdates = {
     channel: 'voice'
@@ -359,18 +366,31 @@ async function callFlow(conversation, ctx) {
       return;
     }
 
-    await ctx.reply('📞 Enter phone number (E.164 format, e.g., +16125151442):');
-    const numMsg = await waitForMessage();
-    const number = numMsg?.message?.text?.trim();
+    const businessOptions = await getBusinessOptions();
+    ensureActive();
 
-    if (!number) {
-      await ctx.reply('❌ Please provide a phone number.');
-      return;
-    }
+    const prefill = ctx.session.meta?.prefill || {};
+    let number = prefill.phoneNumber || null;
 
-    if (!isValidPhoneNumber(number)) {
-      await ctx.reply('❌ Invalid phone number format. Use E.164 format: +16125151442');
-      return;
+    if (number) {
+      await ctx.reply(`📞 Using follow-up number: ${number}`);
+      if (ctx.session.meta) {
+        delete ctx.session.meta.prefill;
+      }
+    } else {
+      await ctx.reply('📞 Enter phone number (E.164 format, e.g., +16125151442):');
+      const numMsg = await waitForMessage();
+      number = numMsg?.message?.text?.trim();
+
+      if (!number) {
+        await ctx.reply('❌ Please provide a phone number.');
+        return;
+      }
+
+      if (!isValidPhoneNumber(number)) {
+        await ctx.reply('❌ Invalid phone number format. Use E.164 format: +16125151442');
+        return;
+      }
     }
 
     const configurationMode = await askOptionWithButtons(
@@ -394,7 +414,7 @@ async function callFlow(conversation, ctx) {
     }
 
     if (!configuration) {
-      configuration = await buildCustomCallConfig(conversation, ctx, ensureActive);
+      configuration = await buildCustomCallConfig(conversation, ctx, ensureActive, businessOptions);
     }
 
     if (!configuration) {

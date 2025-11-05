@@ -20,6 +20,7 @@ const Database = require('./db/db');
 const { webhookService } = require('./routes/status');
 const DynamicFunctionEngine = require('./functions/DynamicFunctionEngine');
 const PersonaComposer = require('./services/PersonaComposer');
+const DEFAULT_PERSONAS = require('./functions/personas');
 
 const VoiceResponse = require('twilio').twiml.VoiceResponse;
 
@@ -2412,6 +2413,272 @@ app.delete('/api/call-templates/:id', async (req, res) => {
     } catch (error) {
         console.error('❌ Failed to delete call template:', error);
         res.status(500).json({ success: false, error: 'Failed to delete call template', details: error.message });
+    }
+});
+
+const PERSONA_SLUG_PATTERN = /^[a-z0-9_-]{3,64}$/;
+
+function isBuiltinPersona(slug) {
+    return DEFAULT_PERSONAS.some((persona) => persona.id === slug);
+}
+
+function sanitizePurposes(input) {
+    if (!input) {
+        return [];
+    }
+
+    if (!Array.isArray(input)) {
+        throw new Error('purposes must be an array');
+    }
+
+    return input
+        .map((item) => {
+            if (!item || typeof item !== 'object') {
+                return null;
+            }
+            const id = typeof item.id === 'string' ? item.id.trim().toLowerCase() : null;
+            const label = typeof item.label === 'string' ? item.label.trim() : null;
+            if (!id || !label) {
+                return null;
+            }
+            return {
+                id,
+                label,
+                emoji: typeof item.emoji === 'string' ? item.emoji : undefined,
+                defaultEmotion: item.defaultEmotion || item.default_emotion || null,
+                defaultUrgency: item.defaultUrgency || item.default_urgency || null,
+                defaultTechnicalLevel: item.defaultTechnicalLevel || item.default_technical_level || null
+            };
+        })
+        .filter(Boolean);
+}
+
+function sanitizeMetadata(input) {
+    if (!input) {
+        return null;
+    }
+    if (typeof input !== 'object') {
+        throw new Error('metadata must be an object');
+    }
+    return input;
+}
+
+app.get('/api/personas', async (req, res) => {
+    try {
+        const custom = await db.listPersonaProfiles();
+        res.json({
+            success: true,
+            builtin: DEFAULT_PERSONAS,
+            custom,
+            counts: {
+                builtin: DEFAULT_PERSONAS.length,
+                custom: custom.length,
+                total: DEFAULT_PERSONAS.length + custom.length
+            }
+        });
+    } catch (error) {
+        console.error('❌ Failed to list personas:', error);
+        res.status(500).json({ success: false, error: 'Failed to list personas', details: error.message });
+    }
+});
+
+app.get('/api/personas/:slug', async (req, res) => {
+    try {
+        const slug = req.params.slug.trim().toLowerCase();
+        const builtin = DEFAULT_PERSONAS.find((persona) => persona.id === slug);
+        if (builtin) {
+            return res.json({ success: true, persona: builtin, source: 'builtin' });
+        }
+
+        const profile = await db.getPersonaProfileBySlug(slug);
+        if (!profile) {
+            return res.status(404).json({ success: false, error: 'Persona not found' });
+        }
+
+        res.json({ success: true, persona: profile, source: 'custom' });
+    } catch (error) {
+        console.error('❌ Failed to fetch persona:', error);
+        res.status(500).json({ success: false, error: 'Failed to fetch persona', details: error.message });
+    }
+});
+
+app.post('/api/personas', async (req, res) => {
+    try {
+        const {
+            slug,
+            label,
+            description = null,
+            purposes,
+            default_purpose,
+            default_emotion,
+            default_urgency,
+            default_technical_level,
+            call_template_id,
+            sms_template_name,
+            metadata,
+            created_by,
+            updated_by
+        } = req.body || {};
+
+        if (typeof slug !== 'string' || !PERSONA_SLUG_PATTERN.test(slug)) {
+            return res.status(400).json({ success: false, error: 'slug must be 3-64 characters (lowercase, digits, hyphen, underscore)' });
+        }
+
+        if (isBuiltinPersona(slug)) {
+            return res.status(409).json({ success: false, error: 'Cannot override built-in persona' });
+        }
+
+        const existing = await db.getPersonaProfileBySlug(slug);
+        if (existing) {
+            return res.status(409).json({ success: false, error: 'Persona with this slug already exists' });
+        }
+
+        if (typeof label !== 'string' || !label.trim()) {
+            return res.status(400).json({ success: false, error: 'label is required' });
+        }
+
+        const sanitizedPurposes = sanitizePurposes(purposes);
+        const sanitizedMetadata = sanitizeMetadata(metadata);
+
+        await db.createPersonaProfile({
+            slug,
+            label: label.trim(),
+            description: typeof description === 'string' ? description.trim() : null,
+            purposes: sanitizedPurposes,
+            default_purpose: default_purpose || null,
+            default_emotion: default_emotion || null,
+            default_urgency: default_urgency || null,
+            default_technical_level: default_technical_level || null,
+            call_template_id: Number.isInteger(call_template_id) ? call_template_id : null,
+            sms_template_name: typeof sms_template_name === 'string' ? sms_template_name.trim() || null : null,
+            metadata: sanitizedMetadata,
+            created_by: created_by || 'api',
+            updated_by: updated_by || created_by || 'api'
+        });
+
+        const persona = await db.getPersonaProfileBySlug(slug);
+        res.status(201).json({ success: true, persona });
+    } catch (error) {
+        if (error instanceof Error && error.message && error.message.includes('must be')) {
+            return res.status(400).json({ success: false, error: error.message });
+        }
+        console.error('❌ Failed to create persona:', error);
+        res.status(500).json({ success: false, error: 'Failed to create persona', details: error.message });
+    }
+});
+
+app.put('/api/personas/:slug', async (req, res) => {
+    try {
+        const slug = req.params.slug.trim().toLowerCase();
+        if (isBuiltinPersona(slug)) {
+            return res.status(403).json({ success: false, error: 'Built-in personas cannot be modified' });
+        }
+
+        const existing = await db.getPersonaProfileBySlug(slug);
+        if (!existing) {
+            return res.status(404).json({ success: false, error: 'Persona not found' });
+        }
+
+        const updates = {};
+        const {
+            label,
+            description,
+            purposes,
+            default_purpose,
+            default_emotion,
+            default_urgency,
+            default_technical_level,
+            call_template_id,
+            sms_template_name,
+            metadata,
+            updated_by
+        } = req.body || {};
+
+        if (label !== undefined) {
+            if (typeof label !== 'string' || !label.trim()) {
+                return res.status(400).json({ success: false, error: 'label must be a non-empty string' });
+            }
+            updates.label = label.trim();
+        }
+
+        if (description !== undefined) {
+            if (description !== null && typeof description !== 'string') {
+                return res.status(400).json({ success: false, error: 'description must be a string or null' });
+            }
+            updates.description = typeof description === 'string' ? description.trim() : null;
+        }
+
+        if (purposes !== undefined) {
+            try {
+                updates.purposes = sanitizePurposes(purposes);
+            } catch (validationError) {
+                return res.status(400).json({ success: false, error: validationError.message });
+            }
+        }
+
+        if (default_purpose !== undefined) updates.default_purpose = default_purpose || null;
+        if (default_emotion !== undefined) updates.default_emotion = default_emotion || null;
+        if (default_urgency !== undefined) updates.default_urgency = default_urgency || null;
+        if (default_technical_level !== undefined) updates.default_technical_level = default_technical_level || null;
+
+        if (call_template_id !== undefined) {
+            if (call_template_id === null || Number.isInteger(call_template_id)) {
+                updates.call_template_id = call_template_id;
+            } else {
+                return res.status(400).json({ success: false, error: 'call_template_id must be an integer or null' });
+            }
+        }
+
+        if (sms_template_name !== undefined) {
+            if (sms_template_name === null || typeof sms_template_name === 'string') {
+                updates.sms_template_name = sms_template_name ? sms_template_name.trim() : null;
+            } else {
+                return res.status(400).json({ success: false, error: 'sms_template_name must be a string or null' });
+            }
+        }
+
+        if (metadata !== undefined) {
+            try {
+                updates.metadata = sanitizeMetadata(metadata);
+            } catch (validationError) {
+                return res.status(400).json({ success: false, error: validationError.message });
+            }
+        }
+
+        if (updated_by !== undefined) {
+            updates.updated_by = updated_by;
+        }
+
+        if (Object.keys(updates).length === 0) {
+            return res.status(400).json({ success: false, error: 'No updates provided' });
+        }
+
+        await db.updatePersonaProfile(slug, updates);
+        const persona = await db.getPersonaProfileBySlug(slug);
+        res.json({ success: true, persona });
+    } catch (error) {
+        console.error('❌ Failed to update persona:', error);
+        res.status(500).json({ success: false, error: 'Failed to update persona', details: error.message });
+    }
+});
+
+app.delete('/api/personas/:slug', async (req, res) => {
+    try {
+        const slug = req.params.slug.trim().toLowerCase();
+        if (isBuiltinPersona(slug)) {
+            return res.status(403).json({ success: false, error: 'Built-in personas cannot be deleted' });
+        }
+
+        const existing = await db.getPersonaProfileBySlug(slug);
+        if (!existing) {
+            return res.status(404).json({ success: false, error: 'Persona not found' });
+        }
+
+        await db.deletePersonaProfile(slug);
+        res.json({ success: true });
+    } catch (error) {
+        console.error('❌ Failed to delete persona:', error);
+        res.status(500).json({ success: false, error: 'Failed to delete persona', details: error.message });
     }
 });
 
