@@ -149,6 +149,8 @@ async function otpFlow(conversation, ctx) {
   let prompt = template?.prompt;
   let firstMessage = template?.first_message;
   let templateName = template?.name || 'Custom';
+  let businessId = template?.business_id || config.defaultBusinessId;
+  const otpDigits = 6;
   if (!template) {
     const customScript = await promptForCustomScript(conversation, ctx, ensureActive);
     prompt = `You are calling to verify a one-time passcode. Follow this script faithfully, sound human, and ask the user for their OTP:\n${customScript}`;
@@ -163,15 +165,41 @@ async function otpFlow(conversation, ctx) {
   const payload = {
     number,
     call_type: 'service',
+    purpose: 'otp_verification',
+    business_function: 'otp_verification',
     template: templateName,
-    business_id: template?.business_id || config.defaultBusinessId,
+    business_id: businessId,
     prompt,
     first_message: firstMessage,
     voice_model: template?.voice_model || config.defaultVoiceModel,
     channel: 'voice',
+    collect_digits: otpDigits,
+    input_sequence: [
+      {
+        stage: 'OTP',
+        label: 'One-Time Passcode',
+        numDigits: otpDigits,
+        pattern: '^\\d+$',
+        successMessage: 'Thanks, that looks good.',
+        failureMessage: 'That did not look like an OTP. Please try again.',
+      },
+    ],
     metadata_json: JSON.stringify({
-      enable_structured_inputs: false,
+      enable_structured_inputs: true,
+      otp_mode: true,
       otp_prompt: 'Please share the one-time passcode you received.',
+      otp_template: templateName,
+      business_id: businessId,
+      default_digit_length: otpDigits,
+      otp_length: otpDigits,
+      input_sequence: [
+        {
+          stage: 'OTP',
+          label: 'One-Time Passcode',
+          numDigits: otpDigits,
+          pattern: '^\\d+$',
+        },
+      ],
     }),
   };
 
