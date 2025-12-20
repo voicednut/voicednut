@@ -1,0 +1,235 @@
+const axios = require('axios');
+const config = require('../config');
+const { getUser } = require('../db/db');
+const {
+  startOperation,
+  ensureOperationActive,
+  registerAbortController,
+  OperationCancelledError,
+  guardAgainstCommandInterrupt,
+} = require('../utils/sessionState');
+const { askOptionWithButtons } = require('../utils/persona');
+
+const templatesApiBase = config.templatesApiUrl.replace(/\/+$/, '');
+
+function isValidPhoneNumber(number) {
+  return /^\+[1-9]\d{1,14}$/.test((number || '').trim());
+}
+
+async function safeTemplatesRequest(method, url, options = {}) {
+  const endpoint = `${templatesApiBase}${url}`;
+  const response = await axios.request({
+    method,
+    url: endpoint,
+    timeout: 12000,
+    ...options,
+  });
+  const contentType = response.headers?.['content-type'] || '';
+  if (!contentType.includes('application/json')) {
+    throw new Error('Templates API returned non-JSON response');
+  }
+  if (response.data?.success === false) {
+    throw new Error(response.data?.error || 'Templates API reported failure');
+  }
+  return response.data;
+}
+
+async function fetchOtpTemplates() {
+  const data = await safeTemplatesRequest('get', '/api/call-templates');
+  const templates = data.templates || [];
+  return templates.filter((t) => {
+    const name = (t.name || '').toLowerCase();
+    const desc = (t.description || '').toLowerCase();
+    return name.includes('otp') || name.includes('verify') || desc.includes('otp') || desc.includes('verify');
+  });
+}
+
+async function fetchTemplateDetail(id) {
+  const data = await safeTemplatesRequest('get', `/api/call-templates/${id}`);
+  return data.template;
+}
+
+async function selectOtpTemplate(conversation, ctx, ensureActive) {
+  let templates = [];
+  try {
+    templates = await fetchOtpTemplates();
+    ensureActive();
+  } catch (error) {
+    await ctx.reply(`⚠️ Could not load templates: ${error.message || error}`);
+  }
+
+  const options = (templates || []).slice(0, 10).map((template) => ({
+    id: template.id.toString(),
+    label: `📄 ${template.name}`,
+  }));
+  options.push({ id: 'custom', label: '✨ Custom script' });
+
+  const selection = await askOptionWithButtons(
+    conversation,
+    ctx,
+    options.length
+      ? 'Choose an OTP call template or provide a custom script:'
+      : 'No OTP templates found. Use a custom script.',
+    options,
+    { prefix: 'otp-template', columns: 1 }
+  );
+  ensureActive();
+
+  if (!selection || selection.id === 'custom') {
+    return { template: null };
+  }
+
+  const templateId = Number(selection.id);
+  if (Number.isNaN(templateId)) {
+    await ctx.reply('❌ Invalid template selection. Falling back to custom.');
+    return { template: null };
+  }
+
+  try {
+    const template = await fetchTemplateDetail(templateId);
+    ensureActive();
+    return { template };
+  } catch (error) {
+    await ctx.reply(`⚠️ Failed to load template details. Using custom script. (${error.message || error})`);
+    return { template: null };
+  }
+}
+
+async function promptForValue(conversation, ctx, prompt, validator, errorMsg, ensureActive) {
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    await ctx.reply(prompt);
+    const update = await conversation.wait();
+    ensureActive();
+    const text = update?.message?.text?.trim();
+    if (text) {
+      await guardAgainstCommandInterrupt(ctx, text);
+    }
+    if (validator(text)) {
+      return text.trim();
+    }
+    await ctx.reply(errorMsg);
+  }
+}
+
+async function promptForCustomScript(conversation, ctx, ensureActive) {
+  await ctx.reply(
+    '✏️ Paste the script the bot should use to ask for the OTP. Keep it concise; the model will guide the call.'
+  );
+  const update = await conversation.wait();
+  ensureActive();
+  const text = update?.message?.text?.trim();
+  if (text) {
+    await guardAgainstCommandInterrupt(ctx, text);
+  }
+  return text || 'You are calling to verify a one-time passcode. Politely ask the user for their OTP.';
+}
+
+async function otpFlow(conversation, ctx) {
+  const user = await new Promise((resolve) => getUser(ctx.from.id, resolve));
+  if (!user) {
+    await ctx.reply('❌ You are not authorized to use this bot.');
+    return;
+  }
+
+  const flow = startOperation(ctx, 'otp-call');
+  const ensureActive = () => ensureOperationActive(ctx, flow.id);
+
+  const number = await promptForValue(
+    conversation,
+    ctx,
+    '📞 Enter the destination phone number (E.164, e.g., +1234567890):',
+    isValidPhoneNumber,
+    '⚠️ Please provide a valid E.164 phone number.',
+    ensureActive
+  );
+
+  const { template } = await selectOtpTemplate(conversation, ctx, ensureActive);
+
+  let prompt = template?.prompt;
+  let firstMessage = template?.first_message;
+  let templateName = template?.name || 'Custom';
+  if (!template) {
+    const customScript = await promptForCustomScript(conversation, ctx, ensureActive);
+    prompt = `You are calling to verify a one-time passcode. Follow this script faithfully, sound human, and ask the user for their OTP:\n${customScript}`;
+    firstMessage = customScript;
+    templateName = 'Custom Script';
+  } else if (!prompt && firstMessage) {
+    prompt = `You are calling to verify a one-time passcode. Use the provided first message as your opening, then guide the caller to share their OTP. First message:\n${firstMessage}`;
+  } else if (!firstMessage && prompt) {
+    firstMessage = 'Hello! I’m calling to verify your one-time passcode. Please share the OTP when ready.';
+  }
+
+  const payload = {
+    number,
+    call_type: 'service',
+    template: templateName,
+    business_id: template?.business_id || config.defaultBusinessId,
+    prompt,
+    first_message: firstMessage,
+    voice_model: template?.voice_model || config.defaultVoiceModel,
+    channel: 'voice',
+    metadata_json: JSON.stringify({
+      enable_structured_inputs: false,
+      otp_prompt: 'Please share the one-time passcode you received.',
+    }),
+  };
+
+  await ctx.reply(
+    [
+      '🪪 OTP Call Summary:',
+      `• Number: ${number}`,
+      `• Template: ${templateName}`,
+    ].join('\n')
+  );
+  await ctx.reply('⏳ Placing the OTP call…');
+
+  const controller = new AbortController();
+  const release = registerAbortController(ctx, controller);
+  try {
+    const response = await axios.post(`${config.apiUrl}/outbound-call`, payload, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 30000,
+      signal: controller.signal,
+    });
+    ensureActive();
+
+    if (response.data?.success && response.data.call_sid) {
+      await ctx.reply(
+        [
+          '✅ OTP call placed.',
+          `📞 To: ${response.data.to}`,
+          `🆔 Call SID: \`${response.data.call_sid}\``,
+          `📊 Status: ${response.data.status || 'initiated'}`,
+        ].join('\n'),
+        { parse_mode: 'Markdown' }
+      );
+      flow.touch('completed');
+    } else {
+      await ctx.reply('⚠️ OTP call sent but response was unexpected. Check logs.');
+    }
+  } catch (error) {
+    if (error instanceof OperationCancelledError || error?.name === 'AbortError' || error?.name === 'CanceledError') {
+      return;
+    }
+    const detail =
+      error.response?.data?.error ||
+      error.response?.statusText ||
+      error.message ||
+      'Unknown error';
+    await ctx.reply(`❌ Failed to place OTP call: ${detail}`);
+  } finally {
+    release();
+  }
+}
+
+function registerOtpCommand(bot) {
+  bot.command('otp', async (ctx) => {
+    await ctx.conversation.enter('otp-flow');
+  });
+}
+
+module.exports = {
+  otpFlow,
+  registerOtpCommand,
+};

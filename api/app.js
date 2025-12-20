@@ -27,6 +27,7 @@ const { AwsConnectAdapter, AwsTtsAdapter, AwsSmsAdapter, VonageVoiceAdapter, Von
 const { v4: uuidv4 } = require('uuid');
 const dtmfUtils = require('./utils/dtmf');
 const { normalizeAnsweredBy, isHumanAnsweredBy, isMachineAnsweredBy } = require('./utils/amd');
+const ProviderRegistry = require('./services/ProviderRegistry');
 
 const VoiceResponse = require('twilio').twiml.VoiceResponse;
 
@@ -92,12 +93,20 @@ const awsCallSessions = new Map();
 const awsContactIndex = new Map();
 const vonageCallIndex = new Map();
 const callDtmfBuffers = new Map();
+const callDtmfAttempts = new Map(); // tracks retries per call/stage
 const DTMF_FLUSH_DELAY_MS = 1500;
+const DTMF_MAX_ATTEMPTS_DEFAULT = 3;
 let awsAdapters = null;
 let vonageAdapters = null;
+const providerRegistry = new ProviderRegistry({
+  defaultProvider: 'twilio',
+  supportedProviders: SUPPORTED_CALL_PROVIDERS
+});
+let providersRegistered = false;
 
 const COLLECT_INPUT_FUNCTIONS = new Set(['ivr_survey', 'pin_entry', 'menu_selection', 'otp_collection', 'account_verification']);
 const collectInputCompletion = new Set();
+const ALLOWED_COMPLIANCE_POLICIES = new Set(['safe', 'pii', 'pci']);
 
 const DEFAULT_SECURE_INPUT_TEMPLATE = [
   {
@@ -251,6 +260,57 @@ function ensureStructuredInputSequence(callConfig, metadataPayload) {
   }
 }
 
+function resolveCompliancePolicy(metadataPayload = {}) {
+  const requested = (metadataPayload.compliance_policy || complianceConfig?.defaultPolicy || 'safe').toString().toLowerCase();
+  return ALLOWED_COMPLIANCE_POLICIES.has(requested) ? requested : 'safe';
+}
+
+function resolveRetentionDays(value) {
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric >= 0) {
+    return numeric;
+  }
+  return complianceConfig?.retentionDays || 30;
+}
+
+function getStageConstraints(stageConfig = {}, callMetadata = {}) {
+  const expectedLength =
+    Number(stageConfig.numDigits) ||
+    Number(stageConfig.expectedLength) ||
+    Number(stageConfig.length) ||
+    Number(callMetadata.default_digit_length) ||
+    null;
+  const allowedPattern = stageConfig.allowedPattern || stageConfig.pattern || /^[0-9]+$/;
+  const maxAttempts =
+    Number(stageConfig.maxAttempts) ||
+    Number(callMetadata.max_attempts) ||
+    DTMF_MAX_ATTEMPTS_DEFAULT;
+
+  return {
+    expectedLength: Number.isFinite(expectedLength) ? expectedLength : null,
+    allowedPattern,
+    maxAttempts: Number.isFinite(maxAttempts) && maxAttempts > 0 ? maxAttempts : DTMF_MAX_ATTEMPTS_DEFAULT,
+  };
+}
+
+function trackStageAttempt(callSid, stageKey) {
+  const normalized = dtmfUtils.normalizeStage(stageKey || 'GENERIC');
+  const map = callDtmfAttempts.get(callSid) || new Map();
+  const attempts = (map.get(normalized) || 0) + 1;
+  map.set(normalized, attempts);
+  callDtmfAttempts.set(callSid, map);
+  return attempts;
+}
+
+function resetStageAttempts(callSid, stageKey) {
+  const map = callDtmfAttempts.get(callSid);
+  if (!map) return;
+  map.delete(dtmfUtils.normalizeStage(stageKey || 'GENERIC'));
+  if (!map.size) {
+    callDtmfAttempts.delete(callSid);
+  }
+}
+
 
 function sanitizeDigits(rawInput) {
   if (rawInput == null) {
@@ -318,6 +378,9 @@ async function persistDtmfCapture(callSid, digits, options = {}) {
 
     const callMetadata = parseMetadataJson(callRecord.metadata_json) || {};
     const inputSequence = Array.isArray(callMetadata.input_sequence) ? callMetadata.input_sequence : [];
+    const compliancePolicy =
+      (callMetadata && callMetadata.compliance_policy) || complianceConfig?.defaultPolicy || 'safe';
+    const retentionDays = callMetadata?.retention_days || complianceConfig?.retentionDays;
 
     let callInputStep = typeof providedCallInputStep === 'number' ? providedCallInputStep : null;
     if (callRecord.call_type === 'collect_input' && !skipCallInputInsert) {
@@ -350,6 +413,8 @@ async function persistDtmfCapture(callSid, digits, options = {}) {
       const stepIndex = callInputStep && inputSequence.length ? callInputStep - 1 : 0;
       const stageConfig =
         (typeof stepIndex === 'number' && inputSequence[stepIndex]) || inputSequence[inputSequence.length - 1];
+      const constraints = getStageConstraints(stageConfig, callMetadata);
+
       if (stageConfig) {
         if (!stageKey && stageConfig.stage) {
           stageKey = dtmfUtils.normalizeStage(stageConfig.stage);
@@ -359,6 +424,50 @@ async function persistDtmfCapture(callSid, digits, options = {}) {
         if (!stageLabel && stageConfig.label) {
           stageLabel = stageConfig.label;
         }
+
+        let allowedRegex = null;
+        try {
+          allowedRegex = constraints.allowedPattern instanceof RegExp
+            ? constraints.allowedPattern
+            : new RegExp(constraints.allowedPattern);
+        } catch (patternError) {
+          console.warn(`Invalid DTMF pattern for stage ${stageKey}:`, patternError.message);
+        }
+
+        const lengthMismatch = constraints.expectedLength && sanitizedDigits.length !== constraints.expectedLength;
+        const patternMismatch = allowedRegex ? !allowedRegex.test(sanitizedDigits) : false;
+
+        if (lengthMismatch || patternMismatch) {
+          const attempts = trackStageAttempt(callSid, stageKey);
+          const invalidReason = lengthMismatch ? 'length_mismatch' : 'pattern_mismatch';
+          const maxAttempts = constraints.maxAttempts;
+
+          await db.updateCallState(callSid, 'dtmf_invalid', {
+            stage_key: stageKey,
+            digits_preview: sanitizedDigits,
+            reason: invalidReason,
+            attempts,
+            max_attempts: maxAttempts,
+            expected_length: constraints.expectedLength || null,
+          });
+
+          console.warn(
+            `⚠️ Rejected DTMF for ${callSid} stage ${stageKey}: ${invalidReason} (${sanitizedDigits.length} digits, expected ${constraints.expectedLength || 'any'})`
+          );
+
+          return {
+            status: 'invalid',
+            stageKey,
+            stageLabel: stageLabel || stageKey,
+            digits: sanitizedDigits,
+            reason: invalidReason,
+            attempts,
+            maxAttempts,
+            callRecord,
+          };
+        }
+
+        resetStageAttempts(callSid, stageKey);
       }
     }
 
@@ -374,6 +483,7 @@ async function persistDtmfCapture(callSid, digits, options = {}) {
       provider,
       capture_method: captureMethod,
       stage_label: resolvedStageLabel,
+      compliance_policy: compliancePolicy,
     };
 
     if (typeof finished === 'boolean') {
@@ -381,6 +491,9 @@ async function persistDtmfCapture(callSid, digits, options = {}) {
     }
     if (reason) {
       normalizedMetadata.reason = reason;
+    }
+    if (retentionDays !== undefined && retentionDays !== null) {
+      normalizedMetadata.retention_days = retentionDays;
     }
 
     Object.keys(normalizedMetadata).forEach((key) => {
@@ -453,6 +566,30 @@ async function evaluateInputStage(callSid, summary, metadataEnvelope = {}, inter
   const stageDisplay = guidance?.stageLabel || summary.stageLabel || summary.stageKey || 'Entry';
   const transcriptLine = `[Keypad] ${stageDisplay}: ${summary.digits}`;
   const callRecord = summary.callRecord || (await db.getCall(callSid));
+
+  if (summary.status === 'invalid') {
+    try {
+      await db.updateCallState(callSid, 'dtmf_invalid', {
+        stage_key: summary.stageKey,
+        digits_preview: summary.digits,
+        reason: summary.reason || 'invalid',
+        attempts: summary.attempts,
+        max_attempts: summary.maxAttempts,
+      });
+    } catch (stateError) {
+      console.warn('Failed to record invalid DTMF state:', stateError.message);
+    }
+
+    return {
+      stageDisplay,
+      guidance: {
+        needsRetry: true,
+        attempts: summary.attempts,
+        maxAttempts: summary.maxAttempts,
+        agentPrompt: `The keypad input didn't match the expected format. Ask the caller to re-enter ${summary.maxAttempts ? `(${summary.attempts}/${summary.maxAttempts} attempts)` : ''}.`,
+      },
+    };
+  }
 
   try {
     await db.addTranscript({
@@ -798,14 +935,13 @@ function parseDtmfMetadata(metadata) {
 }
 
 function formatDtmfEntriesForResponse(entries = []) {
-  const revealRaw = true;
+  const revealRaw = dtmfUtils.shouldRevealRawDigits();
 
   return entries.map((entry) => {
     const stageKey = dtmfUtils.normalizeStage(entry.stage_key || 'generic');
     const metadata = parseDtmfMetadata(entry.metadata);
-    const decrypted = entry.encrypted_digits ? dtmfUtils.decryptDigits(entry.encrypted_digits) : null;
-    const rawDigits = revealRaw ? decrypted : null;
-    const displayDigits = rawDigits || entry.masked_digits;
+    const decrypted = revealRaw && entry.encrypted_digits ? dtmfUtils.decryptDigits(entry.encrypted_digits) : null;
+    const displayDigits = revealRaw && decrypted ? decrypted : entry.masked_digits;
     const stageDefinition = dtmfUtils.getStageDefinition(stageKey);
 
     const formatted = {
@@ -821,8 +957,8 @@ function formatDtmfEntriesForResponse(entries = []) {
       metadata
     };
 
-    if (rawDigits) {
-      formatted.raw_digits = rawDigits;
+    if (revealRaw && decrypted) {
+      formatted.raw_digits = decrypted;
     }
 
     if (typeof metadata?.length === 'number') {
@@ -878,45 +1014,75 @@ async function ensureVonageAdapters() {
   }
 }
 
+function ensureProviderRegistryInitialized() {
+  if (providersRegistered) {
+    return;
+  }
+
+  providerRegistry.register('twilio', {
+    validate: ({ enforceTwilioAuth } = {}) => {
+      if (!twilioAccountSid || !twilioAuthToken || !twilioFromNumber) {
+        const message = 'Twilio credentials are required to activate the Twilio provider';
+        if (enforceTwilioAuth) {
+          throw new Error(message);
+        }
+        console.warn(`⚠️ ${message}.`.yellow);
+      }
+    },
+    ensure: () => {
+      smsService.setProvider('twilio');
+      awsCallSessions.clear();
+      awsContactIndex.clear();
+      vonageCallIndex.clear();
+      return { smsProvider: 'twilio' };
+    },
+  });
+
+  providerRegistry.register('aws', {
+    ensure: async () => {
+      const adapters = await ensureAwsAdapters();
+      smsService.setProvider('aws', adapters?.sms || null);
+      vonageCallIndex.clear();
+      return { adapters };
+    },
+  });
+
+  providerRegistry.register('vonage', {
+    validate: () => {
+      const { apiKey, apiSecret, applicationId, privateKey } = vonageConfig || {};
+      if (!apiKey || !apiSecret || !applicationId || !privateKey) {
+        throw new Error('Vonage configuration is incomplete. Set VONAGE_API_KEY, VONAGE_API_SECRET, VONAGE_APPLICATION_ID, and VONAGE_PRIVATE_KEY.');
+      }
+    },
+    ensure: async () => {
+      const adapters = await ensureVonageAdapters();
+      smsService.setProvider('vonage', adapters?.sms || null);
+      awsCallSessions.clear();
+      awsContactIndex.clear();
+      return { adapters };
+    },
+  });
+
+  providersRegistered = true;
+}
+
 async function applyProvider(provider, options = {}) {
-  const normalized = SUPPORTED_CALL_PROVIDERS.includes((provider || '').toLowerCase())
-    ? provider.toLowerCase()
-    : 'twilio';
+  ensureProviderRegistryInitialized();
+  const normalized = providerRegistry.normalize(provider);
   const { persist = true } = options;
   const previousProvider = currentProvider;
 
-  if (normalized === 'twilio' && previousProvider !== 'twilio') {
-    if (!twilioAccountSid || !twilioAuthToken || !twilioFromNumber) {
-      throw new Error('Twilio credentials are required to activate the Twilio provider');
-    }
+  const activation = await providerRegistry.activate(normalized, {
+    previousProvider,
+    enforceTwilioAuth: normalized === 'twilio' && previousProvider !== 'twilio',
+  });
+
+  if (normalized === 'vonage' && !vonageConfig?.voice?.fromNumber) {
+    console.warn('⚠️ Vonage voice from number not configured. Calls may fail.'.yellow);
   }
 
-  if (normalized === 'aws') {
-    await ensureAwsAdapters();
-    smsService.setProvider('aws', awsAdapters?.sms || null);
-    vonageCallIndex.clear();
-  } else if (normalized === 'vonage') {
-    const adapters = await ensureVonageAdapters();
-    if (!vonageConfig?.voice?.fromNumber) {
-      console.warn('⚠️ Vonage voice from number not configured. Calls may fail.'.yellow);
-    }
-    smsService.setProvider('vonage', adapters?.sms || null);
-    awsCallSessions.clear();
-    awsContactIndex.clear();
-  } else {
-    if (!twilioAccountSid || !twilioAuthToken || !twilioFromNumber) {
-      console.warn('⚠️ Twilio provider active but Twilio credentials appear incomplete. Outbound calls may fail.'.yellow);
-    }
-    smsService.setProvider('twilio');
-    awsCallSessions.clear();
-    awsContactIndex.clear();
-    if (normalized === 'twilio') {
-      vonageCallIndex.clear();
-    }
-  }
-
-  currentProvider = normalized;
-  isAwsProvider = normalized === 'aws';
+  currentProvider = providerRegistry.getActiveName();
+  isAwsProvider = currentProvider === 'aws';
   platform.provider = currentProvider;
 
   if (persist && db && typeof db.setSystemSetting === 'function') {
@@ -933,7 +1099,7 @@ async function applyProvider(provider, options = {}) {
     console.log(`ℹ️ Call provider remains ${currentProvider.toUpperCase()}`.gray);
   }
 
-  return { changed: previousProvider !== currentProvider, provider: currentProvider };
+  return { changed: previousProvider !== currentProvider, provider: currentProvider, details: activation?.details || {} };
 }
 
 async function synchronizeProviderFromSettings() {
@@ -1586,6 +1752,7 @@ app.ws('/connection', (ws) => {
             await recordDtmfInput(pendingDigits.digits, 'twilio', { finished: false, reason: 'stream_stopped' });
           }
           callDtmfBuffers.delete(callSid);
+          callDtmfAttempts.delete(callSid);
 
           await handleCallEnd(callSid, callStartTime);
           
@@ -1673,6 +1840,7 @@ app.ws('/connection', (ws) => {
       }
       if (callSid) {
         callDtmfBuffers.delete(callSid);
+        callDtmfAttempts.delete(callSid);
       }
 
       const session = callSid ? activeCalls.get(callSid) : undefined;
@@ -2040,6 +2208,10 @@ app.post('/outbound-call', async (req, res) => {
       metadataPayload.input_sequence = sanitizedInputSequence;
     }
     ensureStructuredInputSequence(callConfig, metadataPayload);
+    const compliancePolicy = resolveCompliancePolicy(metadataPayload);
+    const retentionDays = resolveRetentionDays(metadataPayload.retention_days);
+    metadataPayload.compliance_policy = compliancePolicy;
+    metadataPayload.retention_days = retentionDays;
     const metadataSerialized = Object.keys(metadataPayload).length ? JSON.stringify(metadataPayload) : null;
     const resolvedTelegramChatId = requestedTelegramChatId || user_chat_id || null;
 
@@ -2065,6 +2237,8 @@ app.post('/outbound-call', async (req, res) => {
       collect_digits: collect_digits || 4,
       collectThankYouMessage: collect_thank_you_message,
       telegram_chat_id: resolvedTelegramChatId,
+      compliance_policy: compliancePolicy,
+      retention_days: retentionDays,
       metadata_json: metadataSerialized
     };
 

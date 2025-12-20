@@ -102,6 +102,13 @@ const SECTIONS = [
       { key: 'RECORDING_ENABLED', prompt: 'Enable call recording? (true/false)', defaultValue: 'false' },
     ],
   },
+  {
+    comments: ['# Compliance defaults'],
+    fields: [
+      { key: 'COMPLIANCE_DEFAULT_POLICY', prompt: 'Compliance default policy (safe/pii/pci)', defaultValue: 'safe' },
+      { key: 'COMPLIANCE_RETENTION_DAYS', prompt: 'Compliance retention days', defaultValue: '30' },
+    ],
+  },
 ];
 
 async function confirmOverwrite(targetPath) {

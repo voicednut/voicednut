@@ -137,6 +137,7 @@ const {
     updateProvider,
     SUPPORTED_PROVIDERS,
 } = require('./commands/provider');
+const { otpFlow, registerOtpCommand } = require('./commands/otp');
 const {
     addUserFlow,
     registerAddUserCommand,
@@ -157,6 +158,7 @@ bot.use(wrapConversation(smsFlow, "sms-conversation"));
 bot.use(wrapConversation(bulkSmsFlow, "bulk-sms-conversation"));
 bot.use(wrapConversation(templatesFlow, "templates-conversation"));
 bot.use(wrapConversation(personaFlow, "persona-conversation"));
+bot.use(wrapConversation(otpFlow, "otp-flow"));
 
 // Register command handlers
 registerCallCommand(bot);
@@ -167,6 +169,7 @@ registerSmsCommands(bot);
 registerTemplatesCommand(bot);
 registerUserListCommand(bot);
 registerPersonaCommand(bot);
+registerOtpCommand(bot);
 
 
 // Register non-conversation commands

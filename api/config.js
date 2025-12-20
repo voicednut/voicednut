@@ -31,6 +31,15 @@ function ensure(name, fallback) {
   return '';
 }
 
+function ensureRequired(name, contextLabel) {
+  const value = readEnv(name);
+  if (value !== undefined) {
+    return value;
+  }
+  const label = contextLabel ? ` for provider "${contextLabel}"` : '';
+  throw new Error(`Missing required environment variable "${name}"${label}.`);
+}
+
 const corsOriginsRaw = ensure('CORS_ORIGINS', process.env.WEB_APP_URL || '');
 const corsOrigins = corsOriginsRaw
   .split(',')
@@ -38,6 +47,7 @@ const corsOrigins = corsOriginsRaw
   .filter(Boolean);
 
 const callProvider = ensure('CALL_PROVIDER', 'twilio').toLowerCase();
+const isAwsProvider = callProvider === 'aws';
 const awsRegion = ensure('AWS_REGION', 'us-east-1');
 const adminApiToken = readEnv('ADMIN_API_TOKEN');
 const complianceModeRaw = (readEnv('CONFIG_COMPLIANCE_MODE') || 'safe').toLowerCase();
@@ -47,6 +57,18 @@ if (!allowedComplianceModes.has(complianceModeRaw) && !isProduction) {
   console.warn(`Invalid CONFIG_COMPLIANCE_MODE "${complianceModeRaw}". Falling back to "safe".`);
 }
 const dtmfEncryptionKey = readEnv('DTMF_ENCRYPTION_KEY');
+const complianceDefaultPolicyRaw = (readEnv('COMPLIANCE_DEFAULT_POLICY') || 'safe').toLowerCase();
+const allowedCompliancePolicies = new Set(['safe', 'pii', 'pci']);
+const complianceDefaultPolicy = allowedCompliancePolicies.has(complianceDefaultPolicyRaw)
+  ? complianceDefaultPolicyRaw
+  : 'safe';
+if (!allowedCompliancePolicies.has(complianceDefaultPolicyRaw) && !isProduction) {
+  console.warn(`Invalid COMPLIANCE_DEFAULT_POLICY "${complianceDefaultPolicyRaw}". Falling back to "safe".`);
+}
+const complianceRetentionDaysRaw = readEnv('COMPLIANCE_RETENTION_DAYS');
+const complianceRetentionDays = Number.isFinite(Number(complianceRetentionDaysRaw))
+  ? Number(complianceRetentionDaysRaw)
+  : 30;
 
 function loadPrivateKey(rawValue) {
   if (!rawValue) {
@@ -71,6 +93,22 @@ function loadPrivateKey(rawValue) {
 
 const vonagePrivateKey = loadPrivateKey(readEnv('VONAGE_PRIVATE_KEY'));
 
+const awsConnectInstanceId = isAwsProvider
+  ? ensureRequired('AWS_CONNECT_INSTANCE_ID', 'aws')
+  : readEnv('AWS_CONNECT_INSTANCE_ID') || '';
+const awsConnectContactFlowId = isAwsProvider
+  ? ensureRequired('AWS_CONNECT_CONTACT_FLOW_ID', 'aws')
+  : readEnv('AWS_CONNECT_CONTACT_FLOW_ID') || '';
+const awsPinpointApplicationId = isAwsProvider
+  ? ensureRequired('AWS_PINPOINT_APPLICATION_ID', 'aws')
+  : readEnv('AWS_PINPOINT_APPLICATION_ID');
+const awsPinpointOriginationNumber =
+  readEnv('AWS_PINPOINT_ORIGINATION_NUMBER') || readEnv('AWS_CONNECT_SOURCE_PHONE_NUMBER');
+
+if (isAwsProvider && !awsPinpointOriginationNumber) {
+  throw new Error('Missing required environment variable "AWS_PINPOINT_ORIGINATION_NUMBER" or "AWS_CONNECT_SOURCE_PHONE_NUMBER" for provider "aws".');
+}
+
 module.exports = {
   platform: {
     provider: callProvider,
@@ -83,8 +121,8 @@ module.exports = {
   aws: {
     region: awsRegion,
     connect: {
-      instanceId: ensure('AWS_CONNECT_INSTANCE_ID', ''),
-      contactFlowId: ensure('AWS_CONNECT_CONTACT_FLOW_ID', ''),
+      instanceId: awsConnectInstanceId,
+      contactFlowId: awsConnectContactFlowId,
       queueId: readEnv('AWS_CONNECT_QUEUE_ID'),
       sourcePhoneNumber: readEnv('AWS_CONNECT_SOURCE_PHONE_NUMBER'),
       transcriptsQueueUrl: readEnv('AWS_TRANSCRIPTS_QUEUE_URL'),
@@ -99,8 +137,8 @@ module.exports = {
       mediaBucket: readEnv('AWS_MEDIA_BUCKET') || readEnv('AWS_POLLY_OUTPUT_BUCKET'),
     },
     pinpoint: {
-      applicationId: readEnv('AWS_PINPOINT_APPLICATION_ID'),
-      originationNumber: readEnv('AWS_PINPOINT_ORIGINATION_NUMBER') || readEnv('AWS_CONNECT_SOURCE_PHONE_NUMBER'),
+      applicationId: awsPinpointApplicationId,
+      originationNumber: awsPinpointOriginationNumber,
       region: readEnv('AWS_PINPOINT_REGION') || awsRegion,
     },
     transcribe: {
@@ -151,5 +189,7 @@ module.exports = {
     mode: complianceMode,
     encryptionKey: dtmfEncryptionKey,
     isSafe: complianceMode !== 'dev_insecure',
+    defaultPolicy: complianceDefaultPolicy,
+    retentionDays: complianceRetentionDays,
   },
 };

@@ -120,12 +120,20 @@ function savePayloadForCompliance(stageKey, digits, provider, extraMeta = {}) {
   const masked = maskDigits(stageKey, digits);
   const encrypted = encryptDigits(digits);
   const metadata = { ...buildMetadata(stageKey, digits), provider, ...extraMeta };
-  metadata.raw_digits_preview = String(digits || '');
+  if (shouldRevealRawDigits()) {
+    metadata.raw_digits_preview = String(digits || '');
+  }
   return { maskedDigits: masked, encryptedDigits: encrypted, metadata };
 }
 
 function getRawDigits(entry = {}) {
   if (!entry) return '';
+
+  const revealRaw = shouldRevealRawDigits();
+  if (!revealRaw) {
+    const maskedValue = entry.masked_digits ?? '';
+    return maskedValue.toString();
+  }
 
   let parsedMetadata = null;
   if (entry.metadata) {
@@ -152,7 +160,7 @@ function formatSummary(entries = []) {
     };
   }
 
-  const revealRaw = true;
+  const revealRaw = shouldRevealRawDigits();
   const summaryLines = entries.map((entry) => {
     const stage = getStageDefinition(entry.stage_key);
     let label = stage.label || entry.stage_key || 'Entry';
