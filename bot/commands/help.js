@@ -18,6 +18,7 @@ module.exports = (bot) => {
 • /start - Restart bot &amp; show main menu
 • /call - Start a new voice call
 • /sms - Send an SMS message
+• /otp - Place an OTP verification call (choose template or custom)
 • /miniapp - Open web app for advanced actions
 • /smsconversation &lt;phone&gt; - View SMS conversation
 • /transcript &lt;call_sid&gt; - Get call transcript
@@ -67,6 +68,7 @@ module.exports = (bot) => {
 
             const kb = new InlineKeyboard()
                 .text('📞 New Call', 'CALL')
+                .text('🔐 OTP Call', 'OTP')
                 .text('📋 Menu', 'MENU')
                 .row()
                 .text('💬 New Sms', 'SMS')

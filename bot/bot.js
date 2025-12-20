@@ -481,6 +481,7 @@ bot.command('start', async (ctx) => {
 
         // Add buttons
         kb.text('📞 New Call', 'CALL')
+          .text('🔐 OTP Call', 'OTP')
           .text('📚 Guide', 'GUIDE')
             .row()
             .text('💬 New Sms', 'SMS')
@@ -571,6 +572,7 @@ bot.on('callback_query:data', async (ctx) => {
         // Handle conversation actions
         const conversations = {
             'CALL': 'call-conversation',
+            'OTP': 'otp-flow',
             'ADDUSER': 'adduser-conversation',
             'PROMOTE': 'promote-conversation',
             'REMOVE': 'remove-conversation',
@@ -741,6 +743,7 @@ async function executeHelpCommand(ctx) {
         
         const kb = new InlineKeyboard()
         .text('📞 New Call', 'CALL')
+        .text('🔐 OTP Call', 'OTP')
         .text('📋 Menu', 'MENU')
         .row()
         .text('📱 New SMS', 'SMS')
@@ -840,6 +843,7 @@ Version: 2.0.0`;
 
     const kb = new InlineKeyboard()
         .text('📞 New Call', 'CALL')
+        .text('🔐 OTP Call', 'OTP')
         .text('📋 Commands', 'HELP')
         .row()
         .text('🔄 Main Menu', 'MENU')
@@ -854,6 +858,7 @@ Version: 2.0.0`;
 async function executeMenuCommand(ctx, isAdminUser) {
     const kb = new InlineKeyboard()
         .text('📞 New Call', 'CALL')
+        .text('🔐 OTP Call', 'OTP')
         .text('📱 Send SMS', 'SMS')
         .row()
         .text('📋 Recent Calls', 'CALLS')

@@ -7,7 +7,7 @@ async function migrate() {
   try {
     await db.connect();
     console.log('🚀 Running database migrations...');
-    await db.runMigrations();
+    await db.initialize();
     console.log('✅ Database migrations complete');
   } catch (error) {
     console.error('❌ Database migration failed:', error.message);

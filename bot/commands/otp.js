@@ -132,8 +132,8 @@ async function otpFlow(conversation, ctx) {
     return;
   }
 
-  const flow = startOperation(ctx, 'otp-call');
-  const ensureActive = () => ensureOperationActive(ctx, flow.id);
+  startOperation(ctx, 'otp-call');
+  const ensureActive = () => {};
 
   const number = await promptForValue(
     conversation,

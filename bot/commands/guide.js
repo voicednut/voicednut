@@ -6,7 +6,7 @@ module.exports = (bot) => {
         const mainGuide = `📚 *Voice Call Bot Guide*
 
 *Making Calls:*
-1️⃣ Start a call using /call or the Call button
+1️⃣ Start a call using /call (or /otp for passcode verification) or the Call/OTP buttons
 2️⃣ Enter phone number in E.164 format (+1234567890)
 3️⃣ Define the AI agent's behavior/personality
 4️⃣ Set the first message to be spoken
@@ -41,6 +41,7 @@ Version: 1.0.0`;
 
         const kb = new InlineKeyboard()
             .text('📞 New Call', 'CALL')
+            .text('🔐 OTP Call', 'OTP')
             .text('📋 Commands', 'HELP')
             .row()
             .text('💬 New Sms', 'SMS')

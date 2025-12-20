@@ -25,6 +25,7 @@ module.exports = (bot) => {
             }
 
             kb.text('📞 New Call', 'CALL')
+            .text('🔐 OTP Call', 'OTP')
             .text('📱 Send SMS', 'SMS')
             .row()
             .text('📋 Recent Calls', 'CALLS')
