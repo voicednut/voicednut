@@ -290,6 +290,7 @@ class EnhancedDatabase {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 call_sid TEXT NOT NULL,
                 notification_type TEXT NOT NULL,
+                payload TEXT,
                 telegram_chat_id TEXT NOT NULL,
                 status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'sent', 'failed', 'retrying')),
                 error_message TEXT,
@@ -1486,14 +1487,14 @@ class EnhancedDatabase {
     }
 
     // Enhanced webhook notification creation with priority
-    async createEnhancedWebhookNotification(call_sid, notification_type, telegram_chat_id, priority = 'normal') {
+    async createEnhancedWebhookNotification(call_sid, notification_type, telegram_chat_id, priority = 'normal', payload = null) {
         return new Promise((resolve, reject) => {
             const stmt = this.db.prepare(`
-                INSERT INTO webhook_notifications (call_sid, notification_type, telegram_chat_id, priority, retry_count)
-                VALUES (?, ?, ?, ?, 0)
+                INSERT INTO webhook_notifications (call_sid, notification_type, telegram_chat_id, priority, retry_count, payload)
+                VALUES (?, ?, ?, ?, 0, ?)
             `);
             
-            stmt.run([call_sid, notification_type, telegram_chat_id, priority], function(err) {
+            stmt.run([call_sid, notification_type, telegram_chat_id, priority, payload], function(err) {
                 if (err) {
                     reject(err);
                 } else {

@@ -68,12 +68,13 @@ module.exports = (bot) => {
 • For issues or questions, contact support`;
 
             const kb = new InlineKeyboard()
-                .text('📞 New Call', 'CALL')
-                .text('🔐 OTP Call', 'OTP')
+                .text('📞 Call', 'CALL')
+                .text('🔐 OTP', 'OTP')
+                .text('💳 Pay', 'PAYMENT')
                 .text('📋 Menu', 'MENU')
                 .row()
-                .text('💬 New Sms', 'SMS')
-                .text('📚 Full Guide', 'GUIDE');
+                .text('💬 SMS', 'SMS')
+                .text('📚 Guide', 'GUIDE');
 
             if (isOwner) {
                 kb.row()

