@@ -74,6 +74,26 @@ class EnhancedDatabase {
                 )`
             },
             {
+                name: 'add_call_templates_category',
+                sql: 'ALTER TABLE call_templates ADD COLUMN category TEXT',
+                ignoreErrors: ['duplicate column']
+            },
+            {
+                name: 'add_call_templates_tags',
+                sql: 'ALTER TABLE call_templates ADD COLUMN tags TEXT',
+                ignoreErrors: ['duplicate column']
+            },
+            {
+                name: 'add_call_templates_variant',
+                sql: 'ALTER TABLE call_templates ADD COLUMN variant TEXT',
+                ignoreErrors: ['duplicate column']
+            },
+            {
+                name: 'add_call_templates_is_favorite',
+                sql: 'ALTER TABLE call_templates ADD COLUMN is_favorite INTEGER DEFAULT 0',
+                ignoreErrors: ['duplicate column']
+            },
+            {
                 name: 'create_sms_templates_table',
                 sql: `CREATE TABLE IF NOT EXISTS sms_templates (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,7 +161,7 @@ class EnhancedDatabase {
                 await this.execute(
                     migration.sql,
                     `migration failed [${migration.name}]`,
-                    { successMessage: `✅ Migration applied: ${migration.name}` }
+                    { successMessage: `✅ Migration applied: ${migration.name}`, ignoreErrors: migration.ignoreErrors || [] }
                 );
             } catch (error) {
                 error.migration = migration.name;
