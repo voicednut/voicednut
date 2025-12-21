@@ -94,6 +94,9 @@ async function smsFlow(conversation, ctx) {
         } else {
             await ctx.reply('📱 Enter phone number (E.164 format, e.g., +1234567890):');
             const numMsg = await waitForMessage();
+            if (!numMsg) {
+                return;
+            }
             number = numMsg?.message?.text?.trim();
 
             if (!number) return ctx.reply('❌ Please provide a phone number.');
@@ -452,6 +455,9 @@ async function bulkSmsFlow(conversation, ctx) {
         await ctx.reply('📱 Enter phone numbers separated by commas or newlines (max 100):');
 
         const numbersMsg = await waitForMessage();
+        if (!numbersMsg) {
+            return;
+        }
         const numbersText = numbersMsg?.message?.text?.trim();
 
         if (!numbersText) return ctx.reply('❌ Please provide phone numbers.');
@@ -473,6 +479,9 @@ async function bulkSmsFlow(conversation, ctx) {
 
         await ctx.reply(`💬 Enter the message to send to ${numbers.length} recipients (max 1600 chars):`);
         const msgContent = await waitForMessage();
+        if (!msgContent) {
+            return;
+        }
         const message = msgContent?.message?.text?.trim();
 
         if (!message) return ctx.reply('❌ Please provide a message.');
@@ -588,6 +597,9 @@ async function scheduleSmsFlow(conversation, ctx) {
         } else {
             await ctx.reply('📱 Enter phone number (E.164 format):');
             const numMsg = await waitForMessage();
+            if (!numMsg) {
+                return;
+            }
             number = numMsg?.message?.text?.trim();
 
             if (!number || !isValidPhoneNumber(number)) {
@@ -597,11 +609,17 @@ async function scheduleSmsFlow(conversation, ctx) {
 
         await ctx.reply('💬 Enter the message:');
         const msgContent = await waitForMessage();
+        if (!msgContent) {
+            return;
+        }
         const message = msgContent?.message?.text?.trim();
         if (!message) return ctx.reply('❌ Please provide a message.');
 
         await ctx.reply('⏰ Enter schedule time (e.g., "2024-12-25 14:30" or "in 2 hours"):');
         const timeMsg = await waitForMessage();
+        if (!timeMsg) {
+            return;
+        }
         const timeText = timeMsg?.message?.text?.trim();
         if (!timeText) return ctx.reply('❌ Please provide a schedule time.');
 

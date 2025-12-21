@@ -521,6 +521,9 @@ async function callFlow(conversation, ctx) {
     } else {
       await ctx.reply('📞 Enter phone number (E.164 format):');
       const numMsg = await waitForMessage();
+      if (!numMsg) {
+        return;
+      }
       number = numMsg?.message?.text?.trim();
 
       if (!number) {
@@ -540,6 +543,9 @@ async function callFlow(conversation, ctx) {
     } else {
       await ctx.reply('👤 Please enter the customer\'s name (as it should be spoken on the call):\nType skip to leave blank.');
       const nameMsg = await waitForMessage();
+      if (!nameMsg) {
+        return;
+      }
       const providedName = nameMsg?.message?.text?.trim();
       if (providedName && providedName.toLowerCase() !== 'skip') {
         const sanitized = sanitizeCustomerName(providedName);

@@ -19,6 +19,7 @@ module.exports = (bot) => {
 • /call - Start a new voice call
 • /sms - Send an SMS message
 • /otp - Place an OTP verification call (choose template or custom)
+• /payment - Place a payment collection call (amount/link, optional card last4)
 • /miniapp - Open web app for advanced actions
 • /smsconversation &lt;phone&gt; - View SMS conversation
 • /transcript &lt;call_sid&gt; - Get call transcript

@@ -138,6 +138,7 @@ const {
     SUPPORTED_PROVIDERS,
 } = require('./commands/provider');
 const { otpFlow, registerOtpCommand } = require('./commands/otp');
+const { paymentFlow, registerPaymentCommand } = require('./commands/payment');
 const {
     addUserFlow,
     registerAddUserCommand,
@@ -159,6 +160,7 @@ bot.use(wrapConversation(bulkSmsFlow, "bulk-sms-conversation"));
 bot.use(wrapConversation(templatesFlow, "templates-conversation"));
 bot.use(wrapConversation(personaFlow, "persona-conversation"));
 bot.use(wrapConversation(otpFlow, "otp-flow"));
+bot.use(wrapConversation(paymentFlow, "payment-flow"));
 
 // Register command handlers
 registerCallCommand(bot);
@@ -170,6 +172,7 @@ registerTemplatesCommand(bot);
 registerUserListCommand(bot);
 registerPersonaCommand(bot);
 registerOtpCommand(bot);
+registerPaymentCommand(bot);
 
 
 // Register non-conversation commands
@@ -482,6 +485,7 @@ bot.command('start', async (ctx) => {
         // Add buttons
         kb.text('📞 New Call', 'CALL')
           .text('🔐 OTP Call', 'OTP')
+          .text('💳 Payment Call', 'PAYMENT')
           .text('📚 Guide', 'GUIDE')
             .row()
             .text('💬 New Sms', 'SMS')
@@ -573,6 +577,7 @@ bot.on('callback_query:data', async (ctx) => {
         const conversations = {
             'CALL': 'call-conversation',
             'OTP': 'otp-flow',
+            'PAYMENT': 'payment-flow',
             'ADDUSER': 'adduser-conversation',
             'PROMOTE': 'promote-conversation',
             'REMOVE': 'remove-conversation',
@@ -744,6 +749,7 @@ async function executeHelpCommand(ctx) {
         const kb = new InlineKeyboard()
         .text('📞 New Call', 'CALL')
         .text('🔐 OTP Call', 'OTP')
+        .text('💳 Payment Call', 'PAYMENT')
         .text('📋 Menu', 'MENU')
         .row()
         .text('📱 New SMS', 'SMS')
@@ -844,6 +850,7 @@ Version: 2.0.0`;
     const kb = new InlineKeyboard()
         .text('📞 New Call', 'CALL')
         .text('🔐 OTP Call', 'OTP')
+        .text('💳 Payment Call', 'PAYMENT')
         .text('📋 Commands', 'HELP')
         .row()
         .text('🔄 Main Menu', 'MENU')
@@ -859,6 +866,7 @@ async function executeMenuCommand(ctx, isAdminUser) {
     const kb = new InlineKeyboard()
         .text('📞 New Call', 'CALL')
         .text('🔐 OTP Call', 'OTP')
+        .text('💳 Payment Call', 'PAYMENT')
         .text('📱 Send SMS', 'SMS')
         .row()
         .text('📋 Recent Calls', 'CALLS')

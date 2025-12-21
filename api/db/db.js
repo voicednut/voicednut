@@ -61,6 +61,10 @@ class EnhancedDatabase {
                     name TEXT UNIQUE NOT NULL,
                     description TEXT,
                     business_id TEXT,
+                    category TEXT,
+                    tags TEXT,
+                    variant TEXT,
+                    is_favorite INTEGER DEFAULT 0,
                     prompt TEXT,
                     first_message TEXT,
                     persona_config TEXT,
@@ -91,6 +95,14 @@ class EnhancedDatabase {
             {
                 name: 'idx_call_templates_updated_at',
                 sql: 'CREATE INDEX IF NOT EXISTS idx_call_templates_updated_at ON call_templates(updated_at)'
+            },
+            {
+                name: 'idx_call_templates_category',
+                sql: 'CREATE INDEX IF NOT EXISTS idx_call_templates_category ON call_templates(category)'
+            },
+            {
+                name: 'idx_call_templates_variant',
+                sql: 'CREATE INDEX IF NOT EXISTS idx_call_templates_variant ON call_templates(variant)'
             },
             {
                 name: 'idx_sms_templates_name',
@@ -713,6 +725,10 @@ class EnhancedDatabase {
             name,
             description,
             business_id,
+            category,
+            tags,
+            variant,
+            is_favorite,
             prompt,
             first_message,
             persona_config,
@@ -723,8 +739,8 @@ class EnhancedDatabase {
 
         return new Promise((resolve, reject) => {
             const sql = `INSERT INTO call_templates (
-                name, description, business_id, prompt, first_message, persona_config, voice_model
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)`;
+                name, description, business_id, category, tags, variant, is_favorite, prompt, first_message, persona_config, voice_model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
             this.db.run(
                 sql,
@@ -732,6 +748,10 @@ class EnhancedDatabase {
                     name,
                     description || null,
                     business_id || null,
+                    category || null,
+                    tags || null,
+                    variant || null,
+                    is_favorite ? 1 : 0,
                     prompt || null,
                     first_message || null,
                     personaJson,
@@ -752,7 +772,18 @@ class EnhancedDatabase {
         const fields = [];
         const values = [];
 
-        const allowedFields = ['name', 'description', 'business_id', 'prompt', 'first_message', 'voice_model'];
+        const allowedFields = [
+            'name',
+            'description',
+            'business_id',
+            'category',
+            'tags',
+            'variant',
+            'is_favorite',
+            'prompt',
+            'first_message',
+            'voice_model'
+        ];
 
         for (const field of allowedFields) {
             if (updates[field] !== undefined) {

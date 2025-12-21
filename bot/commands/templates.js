@@ -999,6 +999,7 @@ async function listCallTemplatesFlow(conversation, ctx, ensureActive) {
       id: template.id.toString(),
       label: `📄 ${template.name}`
     }));
+    options.push({ id: 'create_new', label: '➕ Create template' });
     options.push({ id: 'back', label: '⬅️ Back' });
 
     const selection = await askOptionWithButtons(
@@ -1010,6 +1011,10 @@ async function listCallTemplatesFlow(conversation, ctx, ensureActive) {
     );
 
     if (selection.id === 'back') {
+      return;
+    }
+    if (selection.id === 'create_new') {
+      await createCallTemplateFlow(conversation, ctx, safeEnsureActive);
       return;
     }
 
