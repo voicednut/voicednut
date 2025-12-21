@@ -96,6 +96,7 @@ const callDtmfBuffers = new Map();
 const callDtmfAttempts = new Map(); // tracks retries per call/stage
 const DTMF_FLUSH_DELAY_MS = 1500;
 const DTMF_MAX_ATTEMPTS_DEFAULT = 3;
+const callPhases = new Map(); // simple phase tracker per call
 let awsAdapters = null;
 let vonageAdapters = null;
 const providerRegistry = new ProviderRegistry({
@@ -311,6 +312,43 @@ function resetStageAttempts(callSid, stageKey) {
   }
 }
 
+async function sendOtpFallbackSms(callRecord, callMetadata, stageKey, attempts, maxAttempts) {
+  if (!smsService || typeof smsService.sendSMS !== 'function') {
+    return;
+  }
+  const to = callRecord?.phone_number;
+  if (!to) {
+    return;
+  }
+  const expectedOtp =
+    callMetadata?.expected_otp ||
+    callMetadata?.otp_code ||
+    callMetadata?.one_time_passcode ||
+    null;
+  const message = expectedOtp
+    ? `We couldn't capture your code on the call. Your one-time passcode is: ${expectedOtp}. Reply STOP to opt out.`
+    : 'We could not capture your code on the call. Please reply to this SMS with your one-time passcode.';
+
+  try {
+    await smsService.sendSMS(to, message);
+    await db.logServiceHealth('dtmf_fallback_sms', 'sent', {
+      call_sid: callRecord.call_sid,
+      stage_key: stageKey,
+      attempts,
+      max_attempts: maxAttempts,
+    });
+  } catch (error) {
+    console.warn('Failed to send OTP fallback SMS:', error.message);
+    await db.logServiceHealth('dtmf_fallback_sms', 'error', {
+      call_sid: callRecord?.call_sid,
+      stage_key: stageKey,
+      attempts,
+      max_attempts: maxAttempts,
+      error: error.message,
+    });
+  }
+}
+
 
 function sanitizeDigits(rawInput) {
   if (rawInput == null) {
@@ -450,10 +488,24 @@ async function persistDtmfCapture(callSid, digits, options = {}) {
             max_attempts: maxAttempts,
             expected_length: constraints.expectedLength || null,
           });
+          callPhases.set(callSid, { phase: 'ask_otp_retry', updated_at: Date.now(), stage: stageKey, attempts });
+
+          await db.logServiceHealth('dtmf_invalid', 'error', {
+            call_sid: callSid,
+            stage_key: stageKey,
+            reason: invalidReason,
+            attempts,
+            max_attempts: maxAttempts,
+          });
 
           console.warn(
             `⚠️ Rejected DTMF for ${callSid} stage ${stageKey}: ${invalidReason} (${sanitizedDigits.length} digits, expected ${constraints.expectedLength || 'any'})`
           );
+
+          if (attempts >= maxAttempts && callRecord) {
+            callPhases.set(callSid, { phase: 'sms_fallback', updated_at: Date.now(), stage: stageKey, attempts });
+            await sendOtpFallbackSms(callRecord, callMetadata, stageKey, attempts, maxAttempts);
+          }
 
           return {
             status: 'invalid',
@@ -523,6 +575,7 @@ async function persistDtmfCapture(callSid, digits, options = {}) {
     });
 
     await db.markCallHasInput(callSid, sanitizedDigits);
+    callPhases.set(callSid, { phase: 'confirm', updated_at: Date.now(), stage: compliancePayload.metadata.stage_key });
 
     const targetChatId = callRecord.telegram_chat_id || callRecord.user_chat_id;
     if (callRecord.call_type !== 'collect_input' && targetChatId) {
@@ -586,7 +639,7 @@ async function evaluateInputStage(callSid, summary, metadataEnvelope = {}, inter
         needsRetry: true,
         attempts: summary.attempts,
         maxAttempts: summary.maxAttempts,
-        agentPrompt: `The keypad input didn't match the expected format. Ask the caller to re-enter ${summary.maxAttempts ? `(${summary.attempts}/${summary.maxAttempts} attempts)` : ''}.`,
+        agentPrompt: `The keypad input didn't match the expected format. Ask the caller to re-enter ${summary.maxAttempts ? `(${summary.attempts}/${summary.maxAttempts} attempts)` : ''}. If they continue to struggle, offer to send an OTP by SMS.`,
       },
     };
   }
@@ -1763,6 +1816,7 @@ app.ws('/connection', (ws) => {
             callFunctionSystems.delete(callSid);
             console.log(`🧹 Cleaned up adaptive configuration for call: ${callSid}`.yellow);
           }
+          callPhases.delete(callSid);
         }
       } catch (messageError) {
         console.error('❌ Error processing WebSocket message:', messageError);
@@ -1937,6 +1991,7 @@ async function handleCallEnd(callSid, callStartTime) {
       interactions: transcripts.length,
       adaptations: adaptationAnalysis.personalityChanges || 0
     });
+    callPhases.delete(callSid);
 
   } catch (error) {
     console.error('Error handling enhanced adaptive call end:', error);
@@ -2373,6 +2428,7 @@ app.post('/outbound-call', async (req, res) => {
         telegram_chat_id: resolvedTelegramChatId,
         metadata_json: metadataSerialized
       });
+      callPhases.set(callSid, { phase: 'intro', updated_at: Date.now() });
 
       if (user_chat_id) {
         await db.createEnhancedWebhookNotification(callSid, 'call_initiated', user_chat_id);
@@ -3222,6 +3278,14 @@ app.get('/health', async (req, res) => {
         database: {
           connected: true,
           recent_calls: calls.length
+        },
+        dtmf: {
+          invalid: recentHealthLogs
+            .filter((row) => row.service_name === 'dtmf_invalid')
+            .reduce((sum, row) => sum + (row.count || 0), 0),
+          fallback_sms: recentHealthLogs
+            .filter((row) => row.service_name === 'dtmf_fallback_sms')
+            .reduce((sum, row) => sum + (row.count || 0), 0),
         },
         webhook_service: webhookHealth,
         call_tracking: callStats,

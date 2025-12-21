@@ -113,6 +113,53 @@ async function collectPlaceholderValues(conversation, ctx, placeholders, ensureA
   return values;
 }
 
+async function promptForTemplateCreation(conversation, ctx, ensureActive) {
+  await ctx.reply('➕ Enter a name for the new call template:');
+  const nameUpdate = await conversation.wait();
+  ensureActive();
+  const name = nameUpdate?.message?.text?.trim();
+  if (!name) {
+    await ctx.reply('❌ Template name is required.');
+    return null;
+  }
+
+  await ctx.reply('✏️ Paste the script/prompt for this template (will also be used as the first message):');
+  const scriptUpdate = await conversation.wait();
+  ensureActive();
+  const script = scriptUpdate?.message?.text?.trim();
+  if (!script) {
+    await ctx.reply('❌ Template script is required.');
+    return null;
+  }
+
+  try {
+    const resp = await axios.post(`${templatesApiBase}/api/call-templates`, {
+      name,
+      description: 'Template created from bot',
+      prompt: script,
+      first_message: script,
+      business_id: config.defaultBusinessId,
+      voice_model: config.defaultVoiceModel
+    }, {
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': config.admin.apiToken
+      },
+      timeout: 15000
+    });
+    const template = resp.data?.template;
+    if (template) {
+      await ctx.reply(`✅ Created template "${template.name}".`);
+      return template;
+    }
+  } catch (error) {
+    const detail = error.response?.data?.error || error.message || 'Unknown error creating template';
+    await ctx.reply(`⚠️ Failed to create template: ${detail}`);
+  }
+
+  return null;
+}
+
 async function fetchCallTemplates() {
   const data = await safeTemplatesRequest('get', '/api/call-templates');
   return data.templates || [];
@@ -134,11 +181,14 @@ async function selectCallTemplate(conversation, ctx, ensureActive) {
   }
 
   if (!templates.length) {
-    await ctx.reply('ℹ️ No call templates available. Use /templates to create one.');
-    return null;
+    await ctx.reply('ℹ️ No call templates available. Create one now.');
   }
 
-  const options = templates.map((template) => ({ id: template.id.toString(), label: `📄 ${template.name}` }));
+  const options = [];
+  if (templates.length) {
+    options.push(...templates.map((template) => ({ id: template.id.toString(), label: `📄 ${template.name}` })));
+  }
+  options.push({ id: 'create_new', label: '➕ Create template' });
   options.push({ id: 'back', label: '⬅️ Back' });
 
   const selection = await askOptionWithButtons(
@@ -154,6 +204,10 @@ async function selectCallTemplate(conversation, ctx, ensureActive) {
     return null;
   }
 
+  if (selection.id === 'create_new') {
+    return { templateId: 'create_new' };
+  }
+
   const templateId = Number(selection.id);
   if (Number.isNaN(templateId)) {
     await ctx.reply('❌ Invalid template selection.');
@@ -161,12 +215,16 @@ async function selectCallTemplate(conversation, ctx, ensureActive) {
   }
 
   let template;
-  try {
-    template = await fetchCallTemplateById(templateId);
-    ensureActive();
-  } catch (error) {
-    await ctx.reply(error.message || '❌ Failed to load template.');
-    return null;
+  if (templateId === 'create_new') {
+    template = await promptForTemplateCreation(conversation, ctx, ensureActive);
+  } else {
+    try {
+      template = await fetchCallTemplateById(templateId);
+      ensureActive();
+    } catch (error) {
+      await ctx.reply(error.message || '❌ Failed to load template.');
+      return null;
+    }
   }
 
   if (!template) {
