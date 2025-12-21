@@ -8,7 +8,10 @@ async function addUserFlow(conversation, ctx) {
     const idMsg = await conversation.wait();
     const idText = idMsg?.message?.text?.trim();
     if (idText) {
-      await guardAgainstCommandInterrupt(ctx, idText);
+      const interrupted = await guardAgainstCommandInterrupt(ctx, idText);
+      if (interrupted) {
+        return;
+      }
     }
     if (!idText) {
       await ctx.reply('❌ Please send a valid text message.');
@@ -25,7 +28,10 @@ async function addUserFlow(conversation, ctx) {
     const usernameMsg = await conversation.wait();
     const usernameText = usernameMsg?.message?.text?.trim();
     if (usernameText) {
-      await guardAgainstCommandInterrupt(ctx, usernameText);
+      const interrupted = await guardAgainstCommandInterrupt(ctx, usernameText);
+      if (interrupted) {
+        return;
+      }
     }
     if (!usernameText) {
       await ctx.reply('❌ Please send a valid username.');
@@ -88,7 +94,10 @@ async function promoteFlow(conversation, ctx) {
     const idMsg = await conversation.wait();
     const idText = idMsg?.message?.text?.trim();
     if (idText) {
-      await guardAgainstCommandInterrupt(ctx, idText);
+      const interrupted = await guardAgainstCommandInterrupt(ctx, idText);
+      if (interrupted) {
+        return;
+      }
     }
     if (!idText) {
       await ctx.reply('❌ Please send a valid Telegram ID.');
@@ -147,12 +156,15 @@ function registerPromoteCommand(bot) {
 // ------------------------- Remove User Flow -------------------------
 async function removeUserFlow(conversation, ctx) {
   try {
-    await ctx.reply('🆔 Enter Telegram ID to remove:');
-    const idMsg = await conversation.wait();
-    const idText = idMsg?.message?.text?.trim();
-    if (idText) {
-      await guardAgainstCommandInterrupt(ctx, idText);
+  await ctx.reply('🆔 Enter Telegram ID to remove:');
+  const idMsg = await conversation.wait();
+  const idText = idMsg?.message?.text?.trim();
+  if (idText) {
+    const interrupted = await guardAgainstCommandInterrupt(ctx, idText);
+    if (interrupted) {
+      return;
     }
+  }
     if (!idText) {
       await ctx.reply('❌ Please send a valid Telegram ID.');
       return;

@@ -214,10 +214,10 @@ function isSlashCommandInput(text) {
 
 async function guardAgainstCommandInterrupt(ctx, text, reason = 'command_interrupt') {
   if (!isSlashCommandInput(text)) {
-    return;
+    return false;
   }
   await safeReset(ctx, reason, { notify: false });
-  throw new OperationCancelledError('Conversation interrupted by slash command');
+  return true;
 }
 
 module.exports = {

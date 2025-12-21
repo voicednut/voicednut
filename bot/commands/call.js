@@ -103,7 +103,10 @@ async function collectPlaceholderValues(conversation, ctx, placeholders, ensureA
     ensureActive();
     const text = update?.message?.text?.trim();
     if (text) {
-      await guardAgainstCommandInterrupt(ctx, text);
+      const interrupted = await guardAgainstCommandInterrupt(ctx, text);
+      if (interrupted) {
+        continue;
+      }
     }
     if (!text || text.toLowerCase() === 'skip') {
       continue;
@@ -349,7 +352,10 @@ async function buildCustomCallConfig(conversation, ctx, ensureActive, businessOp
     ensureActive();
     const prompt = promptMsg?.message?.text?.trim();
     if (prompt) {
-      await guardAgainstCommandInterrupt(ctx, prompt);
+      const interrupted = await guardAgainstCommandInterrupt(ctx, prompt);
+      if (interrupted) {
+        return null;
+      }
     }
     if (!prompt) {
       await ctx.reply('❌ Please provide a valid prompt.');
@@ -361,7 +367,10 @@ async function buildCustomCallConfig(conversation, ctx, ensureActive, businessOp
     ensureActive();
     const firstMessage = firstMsg?.message?.text?.trim();
     if (firstMessage) {
-      await guardAgainstCommandInterrupt(ctx, firstMessage);
+      const interrupted = await guardAgainstCommandInterrupt(ctx, firstMessage);
+      if (interrupted) {
+        return null;
+      }
     }
     if (!firstMessage) {
       await ctx.reply('❌ Please provide a valid first message.');
@@ -477,7 +486,10 @@ async function callFlow(conversation, ctx) {
     ensureActive();
     const text = update?.message?.text?.trim();
     if (text) {
-      await guardAgainstCommandInterrupt(ctx, text);
+      const interrupted = await guardAgainstCommandInterrupt(ctx, text);
+      if (interrupted) {
+        return null;
+      }
     }
     return update;
   };

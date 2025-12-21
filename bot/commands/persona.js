@@ -118,7 +118,10 @@ async function promptForText(conversation, ctx, message, options = {}) {
 
   const text = update?.message?.text?.trim();
   if (text) {
-    await guardAgainstCommandInterrupt(ctx, text);
+    const interrupted = await guardAgainstCommandInterrupt(ctx, text);
+    if (interrupted) {
+      throw new OperationCancelledError('Persona flow cancelled by slash command');
+    }
   }
   if (!text) {
     if (required) {
