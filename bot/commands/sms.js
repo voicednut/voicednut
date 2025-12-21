@@ -37,13 +37,13 @@ async function smsFlow(conversation, ctx) {
     const waitForMessage = async () => {
         const update = await conversation.wait();
         ensureActive();
-            const text = update?.message?.text?.trim();
-            if (text) {
-                const interrupted = await guardAgainstCommandInterrupt(ctx, text);
-                if (interrupted) {
-                    continue;
-                }
+        const text = update?.message?.text?.trim();
+        if (text) {
+            const interrupted = await guardAgainstCommandInterrupt(ctx, text);
+            if (interrupted) {
+                return null;
             }
+        }
         return update;
     };
     const askWithGuard = async (...params) => {
@@ -427,7 +427,7 @@ async function bulkSmsFlow(conversation, ctx) {
         if (text) {
             const interrupted = await guardAgainstCommandInterrupt(ctx, text);
             if (interrupted) {
-                continue;
+                return null;
             }
         }
         return update;
@@ -551,7 +551,7 @@ async function scheduleSmsFlow(conversation, ctx) {
         if (text) {
             const interrupted = await guardAgainstCommandInterrupt(ctx, text);
             if (interrupted) {
-                continue;
+                return null;
             }
         }
         return update;
