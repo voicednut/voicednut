@@ -204,20 +204,15 @@ async function selectCallTemplate(conversation, ctx, ensureActive) {
     return null;
   }
 
-  if (selection.id === 'create_new') {
-    return { templateId: 'create_new' };
-  }
-
-  const templateId = Number(selection.id);
-  if (Number.isNaN(templateId)) {
-    await ctx.reply('❌ Invalid template selection.');
-    return null;
-  }
-
   let template;
-  if (templateId === 'create_new') {
+  if (selection.id === 'create_new') {
     template = await promptForTemplateCreation(conversation, ctx, ensureActive);
   } else {
+    const templateId = Number(selection.id);
+    if (Number.isNaN(templateId)) {
+      await ctx.reply('❌ Invalid template selection.');
+      return null;
+    }
     try {
       template = await fetchCallTemplateById(templateId);
       ensureActive();
