@@ -153,6 +153,11 @@ class EnhancedDatabase {
             {
                 name: 'idx_persona_profiles_slug',
                 sql: 'CREATE UNIQUE INDEX IF NOT EXISTS idx_persona_profiles_slug ON persona_profiles(slug)'
+            },
+            {
+                name: 'add_webhook_notifications_payload',
+                sql: 'ALTER TABLE webhook_notifications ADD COLUMN payload TEXT',
+                ignoreErrors: ['duplicate column']
             }
         ];
 

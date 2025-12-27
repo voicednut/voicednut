@@ -207,6 +207,26 @@ async function selectCallTemplate(conversation, ctx, ensureActive) {
   let template;
   if (selection.id === 'create_new') {
     template = await promptForTemplateCreation(conversation, ctx, ensureActive);
+    ensureActive();
+    if (!template) {
+      await ctx.reply('❌ Template was not created. Cancelled.');
+      return null;
+    }
+    const useNow = await askOptionWithButtons(
+      conversation,
+      ctx,
+      `Use the newly created template "${template.name}" for this call?`,
+      [
+        { id: 'yes', label: '✅ Yes, use now' },
+        { id: 'no', label: '❌ No, I will use it later' }
+      ],
+      { prefix: 'use-new-template', columns: 2 }
+    );
+    ensureActive();
+    if (!useNow || useNow.id !== 'yes') {
+      await ctx.reply('ℹ️ Template saved. Re-run /call to use it.');
+      return null;
+    }
   } else {
     const templateId = Number(selection.id);
     if (Number.isNaN(templateId)) {
