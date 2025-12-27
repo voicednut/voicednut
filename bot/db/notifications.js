@@ -51,7 +51,44 @@ function markNotification(id, status, telegramMessageId = null, error = null) {
   });
 }
 
+function upsertCallThread(callSid, chatId, messageId) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      `CREATE TABLE IF NOT EXISTS call_threads (
+        call_sid TEXT PRIMARY KEY,
+        telegram_chat_id TEXT NOT NULL,
+        message_id INTEGER NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+      (err) => {
+        if (err) return reject(err);
+        db.run(
+          `INSERT INTO call_threads (call_sid, telegram_chat_id, message_id)
+           VALUES (?, ?, ?)
+           ON CONFLICT(call_sid) DO UPDATE SET message_id = excluded.message_id, telegram_chat_id = excluded.telegram_chat_id, updated_at = CURRENT_TIMESTAMP`,
+          [callSid, chatId, messageId],
+          function (e) {
+            if (e) reject(e);
+            else resolve(this.changes);
+          }
+        );
+      }
+    );
+  });
+}
+
+function getCallThread(callSid) {
+  return new Promise((resolve, reject) => {
+    db.get(`SELECT telegram_chat_id, message_id FROM call_threads WHERE call_sid = ?`, [callSid], (err, row) => {
+      if (err) reject(err);
+      else resolve(row || null);
+    });
+  });
+}
+
 module.exports = {
   fetchPending,
   markNotification,
+  upsertCallThread,
+  getCallThread,
 };

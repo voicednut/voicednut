@@ -2025,6 +2025,24 @@ async function handleCallEnd(callSid, callStartTime) {
         'normal',
         JSON.stringify({ duration, dtmf_count: dtmfEntries.length, interactions: transcripts.length })
       );
+      if (callDetails?.recording_url) {
+        await db.createEnhancedWebhookNotification(
+          callSid,
+          'recording_ready',
+          callDetails.user_chat_id,
+          'normal',
+          JSON.stringify({ url: callDetails.recording_url })
+        );
+      }
+      if (transcripts?.length) {
+        await db.createEnhancedWebhookNotification(
+          callSid,
+          'transcript_ready',
+          callDetails.user_chat_id,
+          'normal',
+          JSON.stringify({ count: transcripts.length })
+        );
+      }
     }
     callPhases.delete(callSid);
 
@@ -2791,7 +2809,19 @@ app.post('/webhook/amd-status', async (req, res) => {
 
     const targetChatId = call.telegram_chat_id || call.user_chat_id;
     if (targetChatId && answeredValue) {
-      await db.createEnhancedWebhookNotification(CallSid, 'call_amd_update', targetChatId, 'high');
+      const isHuman = isHumanAnsweredBy(normalizedAnswer);
+      const isMachine = isMachineAnsweredBy(normalizedAnswer);
+      const type = isHuman ? 'call_human_detected' : isMachine ? 'call_machine_detected' : 'call_amd_update';
+      await db.createEnhancedWebhookNotification(
+        CallSid,
+        type,
+        targetChatId,
+        'high',
+        JSON.stringify({
+          answered_by: answeredValue,
+          confidence: Number.isFinite(confidenceValue) ? confidenceValue : undefined
+        })
+      );
     }
 
     res.status(200).send('OK');
@@ -2852,10 +2882,29 @@ app.post('/webhook/call-status', async (req, res) => {
       if (!call.started_at) {
         updateData.started_at = new Date().toISOString();
       }
+      const targetChatId = call.telegram_chat_id || call.user_chat_id;
+      if (targetChatId) {
+        await db.createEnhancedWebhookNotification(CallSid, 'call_answered', targetChatId, 'high', JSON.stringify({ to: To, from: From }));
+      }
+    } else if (normalizedStatus === 'ringing') {
+      const targetChatId = call.telegram_chat_id || call.user_chat_id;
+      if (targetChatId) {
+        await db.createEnhancedWebhookNotification(CallSid, 'call_ringing', targetChatId, 'high', JSON.stringify({ to: To, from: From }));
+      }
     }
 
     if (['completed', 'no-answer', 'failed', 'busy', 'canceled'].includes(normalizedStatus) && !call.ended_at) {
       updateData.ended_at = new Date().toISOString();
+      const targetChatId = call.telegram_chat_id || call.user_chat_id;
+      if (targetChatId) {
+        await db.createEnhancedWebhookNotification(
+          CallSid,
+          'call_ended',
+          targetChatId,
+          'normal',
+          JSON.stringify({ status: normalizedStatus, duration: durationValue })
+        );
+      }
     }
 
     if (normalizedStatus === 'no-answer' && call.created_at) {

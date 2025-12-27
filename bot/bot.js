@@ -43,9 +43,11 @@ function formatCallEvent(event) {
 
     switch (type) {
         case 'call_initiated':
-            return `📞 Calling ${payload.to || ''} from ${payload.from || ''}`.trim();
+            return `📞 Calling ${payload.to || ''} ${payload.from ? `from ${payload.from}` : ''}`.trim();
         case 'call_answered':
             return '🟢 Call has been answered.';
+        case 'call_ringing':
+            return '🔔 Call is ringing.';
         case 'call_human_detected':
             return '🧑 Human detected.';
         case 'call_machine_detected':
@@ -138,8 +140,20 @@ async function processPendingNotifications() {
         for (const notif of pending) {
             const text = formatCallEvent(notif);
             try {
-                const sent = await bot.api.sendMessage(notif.telegram_chat_id, text);
-                await markNotification(notif.id, 'sent', sent.message_id, null);
+                const existingThread = await getCallThread(notif.call_sid);
+                let messageId = null;
+                if (existingThread && existingThread.telegram_chat_id === notif.telegram_chat_id) {
+                    await bot.api.sendMessage(notif.telegram_chat_id, text, {
+                        reply_to_message_id: existingThread.message_id,
+                        allow_sending_without_reply: true,
+                    });
+                    messageId = existingThread.message_id;
+                } else {
+                    const sent = await bot.api.sendMessage(notif.telegram_chat_id, text);
+                    messageId = sent.message_id;
+                    await upsertCallThread(notif.call_sid, notif.telegram_chat_id, sent.message_id);
+                }
+                await markNotification(notif.id, 'sent', messageId, null);
             } catch (error) {
                 console.error('Failed to send notification', notif.id, error.message);
                 await markNotification(notif.id, 'failed', null, error.message);
@@ -199,7 +213,13 @@ const {
 } = require('./commands/provider');
 const { otpFlow, registerOtpCommand } = require('./commands/otp');
 const { paymentFlow, registerPaymentCommand } = require('./commands/payment');
-const { fetchPending: fetchPendingNotifications, markNotification } = require('./db/notifications');
+const {
+    fetchPending: fetchPendingNotifications,
+    markNotification,
+    upsertCallThread,
+    getCallThread,
+} = require('./db/notifications');
+const { getUser } = require('./db/db');
 const {
     addUserFlow,
     registerAddUserCommand,

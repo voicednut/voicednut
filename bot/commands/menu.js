@@ -24,9 +24,9 @@ module.exports = (bot) => {
                 kb.webApp('📱 Open Mini App', config.miniAppUrl).row();
             }
 
-            kb.text('📞 Call', 'CALL')
-            .text('🔐 OTP', 'OTP')
+            kb.text('📞 Call Center', 'CALL')
             .text('💳 Pay', 'PAYMENT')
+            .text('🔐 OTP', 'OTP')
             .text('💬 SMS', 'SMS')
             .row()
             .text('📋 Calls', 'CALLS')
