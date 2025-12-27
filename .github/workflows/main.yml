@@ -21,7 +21,6 @@ jobs:
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            set -euo pipefail
             # Ensure PM2 is in PATH
             export PATH=$PATH:/home/ubuntu/.npm-global/bin
 
