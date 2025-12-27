@@ -22,10 +22,7 @@ async function promptForValue(conversation, ctx, prompt, validator, errorMsg, en
     ensureActive();
     const text = update?.message?.text?.trim();
     if (text) {
-      const interrupted = await guardAgainstCommandInterrupt(ctx, text);
-      if (interrupted) {
-        continue;
-      }
+      await guardAgainstCommandInterrupt(ctx, text);
     }
     if (validator(text)) {
       return text.trim();
@@ -67,10 +64,7 @@ async function paymentFlow(conversation, ctx) {
   ensureActive();
   let paymentLink = linkUpdate?.message?.text?.trim() || '';
   if (paymentLink) {
-    const interrupted = await guardAgainstCommandInterrupt(ctx, paymentLink);
-    if (interrupted) {
-      return;
-    }
+    await guardAgainstCommandInterrupt(ctx, paymentLink);
   }
   if (paymentLink.toLowerCase() === 'skip') {
     paymentLink = '';

@@ -111,10 +111,7 @@ async function promptForValue(conversation, ctx, prompt, validator, errorMsg, en
     ensureActive();
     const text = update?.message?.text?.trim();
     if (text) {
-      const interrupted = await guardAgainstCommandInterrupt(ctx, text);
-      if (interrupted) {
-        continue;
-      }
+      await guardAgainstCommandInterrupt(ctx, text);
     }
     if (validator(text)) {
       return text.trim();
@@ -131,10 +128,7 @@ async function promptForCustomScript(conversation, ctx, ensureActive) {
   ensureActive();
   const text = update?.message?.text?.trim();
   if (text) {
-    const interrupted = await guardAgainstCommandInterrupt(ctx, text);
-    if (interrupted) {
-      return null;
-    }
+    await guardAgainstCommandInterrupt(ctx, text);
   }
   return text || 'You are calling to verify a one-time passcode. Politely ask the user for their OTP.';
 }
@@ -145,10 +139,7 @@ async function promptForTemplateCreation(conversation, ctx, ensureActive) {
   ensureActive();
   const name = nameUpdate?.message?.text?.trim();
   if (name) {
-    const interrupted = await guardAgainstCommandInterrupt(ctx, name);
-    if (interrupted) {
-      return null;
-    }
+    await guardAgainstCommandInterrupt(ctx, name);
   }
   if (!name) {
     await ctx.reply('❌ Template name is required. Falling back to custom.');
@@ -160,10 +151,7 @@ async function promptForTemplateCreation(conversation, ctx, ensureActive) {
   ensureActive();
   const script = scriptUpdate?.message?.text?.trim();
   if (script) {
-    const interrupted = await guardAgainstCommandInterrupt(ctx, script);
-    if (interrupted) {
-      return null;
-    }
+    await guardAgainstCommandInterrupt(ctx, script);
   }
   if (!script) {
     await ctx.reply('❌ Template content required. Falling back to custom.');

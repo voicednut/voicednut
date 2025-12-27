@@ -212,11 +212,15 @@ function isSlashCommandInput(text) {
   return trimmed.startsWith('/') && trimmed.length > 1;
 }
 
-async function guardAgainstCommandInterrupt(ctx, text, reason = 'command_interrupt') {
+async function guardAgainstCommandInterrupt(ctx, text, reason = 'command_interrupt', options = {}) {
+  const { throwOnInterrupt = true } = options;
   if (!isSlashCommandInput(text)) {
     return false;
   }
   await safeReset(ctx, reason, { notify: false });
+  if (throwOnInterrupt) {
+    throw new OperationCancelledError(reason);
+  }
   return true;
 }
 

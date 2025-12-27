@@ -8,10 +8,7 @@ async function addUserFlow(conversation, ctx) {
     const idMsg = await conversation.wait();
     const idText = idMsg?.message?.text?.trim();
     if (idText) {
-      const interrupted = await guardAgainstCommandInterrupt(ctx, idText);
-      if (interrupted) {
-        return;
-      }
+      await guardAgainstCommandInterrupt(ctx, idText);
     }
     if (!idText) {
       await ctx.reply('❌ Please send a valid text message.');
@@ -28,10 +25,7 @@ async function addUserFlow(conversation, ctx) {
     const usernameMsg = await conversation.wait();
     const usernameText = usernameMsg?.message?.text?.trim();
     if (usernameText) {
-      const interrupted = await guardAgainstCommandInterrupt(ctx, usernameText);
-      if (interrupted) {
-        return;
-      }
+      await guardAgainstCommandInterrupt(ctx, usernameText);
     }
     if (!usernameText) {
       await ctx.reply('❌ Please send a valid username.');
@@ -94,10 +88,7 @@ async function promoteFlow(conversation, ctx) {
     const idMsg = await conversation.wait();
     const idText = idMsg?.message?.text?.trim();
     if (idText) {
-      const interrupted = await guardAgainstCommandInterrupt(ctx, idText);
-      if (interrupted) {
-        return;
-      }
+      await guardAgainstCommandInterrupt(ctx, idText);
     }
     if (!idText) {
       await ctx.reply('❌ Please send a valid Telegram ID.');
@@ -160,10 +151,7 @@ async function removeUserFlow(conversation, ctx) {
   const idMsg = await conversation.wait();
   const idText = idMsg?.message?.text?.trim();
   if (idText) {
-    const interrupted = await guardAgainstCommandInterrupt(ctx, idText);
-    if (interrupted) {
-      return;
-    }
+    await guardAgainstCommandInterrupt(ctx, idText);
   }
     if (!idText) {
       await ctx.reply('❌ Please send a valid Telegram ID.');

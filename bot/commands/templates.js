@@ -170,10 +170,7 @@ async function promptText(
   safeEnsureActive();
   const text = response?.message?.text?.trim();
   if (text) {
-    const interrupted = await guardAgainstCommandInterrupt(ctx, text);
-    if (interrupted) {
-      return null;
-    }
+    await guardAgainstCommandInterrupt(ctx, text);
   }
 
   if (!text) {
@@ -230,10 +227,7 @@ async function collectPlaceholderValues(conversation, ctx, placeholders, ensureA
     safeEnsureActive();
     const text = response?.message?.text?.trim();
     if (text) {
-      const interrupted = await guardAgainstCommandInterrupt(ctx, text);
-      if (interrupted) {
-        return null;
-      }
+      await guardAgainstCommandInterrupt(ctx, text);
     }
     if (!text) {
       continue;

@@ -97,21 +97,18 @@ async function safeTemplatesRequest(method, url, options = {}) {
 
 async function collectPlaceholderValues(conversation, ctx, placeholders, ensureActive) {
   const values = {};
-  for (const placeholder of placeholders) {
-    await ctx.reply(`✏️ Enter value for *${placeholder}* (type skip to leave unchanged):`, { parse_mode: 'Markdown' });
-    const update = await conversation.wait();
-    ensureActive();
-    const text = update?.message?.text?.trim();
-    if (text) {
-      const interrupted = await guardAgainstCommandInterrupt(ctx, text);
-      if (interrupted) {
-        continue;
-      }
-    }
-    if (!text || text.toLowerCase() === 'skip') {
-      continue;
-    }
-    values[placeholder] = text;
+    for (const placeholder of placeholders) {
+        await ctx.reply(`✏️ Enter value for *${placeholder}* (type skip to leave unchanged):`, { parse_mode: 'Markdown' });
+        const update = await conversation.wait();
+        ensureActive();
+        const text = update?.message?.text?.trim();
+        if (text) {
+            await guardAgainstCommandInterrupt(ctx, text);
+        }
+        if (!text || text.toLowerCase() === 'skip') {
+            continue;
+        }
+        values[placeholder] = text;
   }
   return values;
 }
@@ -352,10 +349,7 @@ async function buildCustomCallConfig(conversation, ctx, ensureActive, businessOp
     ensureActive();
     const prompt = promptMsg?.message?.text?.trim();
     if (prompt) {
-      const interrupted = await guardAgainstCommandInterrupt(ctx, prompt);
-      if (interrupted) {
-        return null;
-      }
+      await guardAgainstCommandInterrupt(ctx, prompt);
     }
     if (!prompt) {
       await ctx.reply('❌ Please provide a valid prompt.');
@@ -367,10 +361,7 @@ async function buildCustomCallConfig(conversation, ctx, ensureActive, businessOp
     ensureActive();
     const firstMessage = firstMsg?.message?.text?.trim();
     if (firstMessage) {
-      const interrupted = await guardAgainstCommandInterrupt(ctx, firstMessage);
-      if (interrupted) {
-        return null;
-      }
+      await guardAgainstCommandInterrupt(ctx, firstMessage);
     }
     if (!firstMessage) {
       await ctx.reply('❌ Please provide a valid first message.');
@@ -486,10 +477,7 @@ async function callFlow(conversation, ctx) {
     ensureActive();
     const text = update?.message?.text?.trim();
     if (text) {
-      const interrupted = await guardAgainstCommandInterrupt(ctx, text);
-      if (interrupted) {
-        return null;
-      }
+      await guardAgainstCommandInterrupt(ctx, text);
     }
     return update;
   };
