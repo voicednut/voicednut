@@ -2315,7 +2315,6 @@ app.post('/outbound-call', async (req, res) => {
     if (callType === 'collect_input') {
       metadataPayload.input_sequence = sanitizedInputSequence;
     }
-    ensureStructuredInputSequence(callConfig, metadataPayload);
     const compliancePolicy = resolveCompliancePolicy(metadataPayload);
     const retentionDays = resolveRetentionDays(metadataPayload.retention_days);
     metadataPayload.compliance_policy = compliancePolicy;
@@ -2349,6 +2348,8 @@ app.post('/outbound-call', async (req, res) => {
       retention_days: retentionDays,
       metadata_json: metadataSerialized
     };
+
+    ensureStructuredInputSequence(callConfig, metadataPayload);
 
     let callSid = null;
     let providerContactId = null;
