@@ -199,7 +199,7 @@ async function validateTemplatesApiConnectivity() {
 }
 
 // Import dependencies
-const { getUser, isAdmin, expireInactiveUsers } = require('./db/db');
+const { getUser, getUserList, isAdmin, expireInactiveUsers } = require('./db/db');
 const { callFlow, registerCallCommand } = require('./commands/call');
 const { smsFlow, bulkSmsFlow, scheduleSmsFlow, registerSmsCommands } = require('./commands/sms');
 const { templatesFlow, registerTemplatesCommand } = require('./commands/templates');
@@ -219,7 +219,6 @@ const {
     upsertCallThread,
     getCallThread,
 } = require('./db/notifications');
-const { getUser } = require('./db/db');
 const {
     addUserFlow,
     registerAddUserCommand,
@@ -856,8 +855,6 @@ async function executeHelpCommand(ctx) {
 
 async function executeUsersCommand(ctx) {
     try {
-        const { getUserList } = require('./db/db');
-        
         const users = await new Promise((resolve, reject) => {
             getUserList((err, result) => {
                 if (err) {
