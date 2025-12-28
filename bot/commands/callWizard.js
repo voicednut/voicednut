@@ -34,17 +34,20 @@ async function callWizardFlow(conversation, ctx) {
   await setWizardState(ctx.from.id, ctx.chat.id, selection, {});
   ctx.session = ctx.session || {};
   ctx.session.wizardCategory = selection;
+  conversation.session = conversation.session || {};
+  conversation.session.wizardCategory = selection;
 
   if (selection === 'personal') {
     await ctx.reply('🚀 Starting personal/normal call wizard...');
-    await ctx.conversation.enter('call-conversation');
+    await conversation.enter('call-conversation');
   } else if (selection === 'verification') {
     await ctx.reply('🔐 Starting verification call wizard...');
-    await ctx.conversation.enter('otp-flow');
+    await conversation.enter('otp-flow');
   } else if (selection === 'payment' || selection === 'card') {
     ctx.session.wizardCardMode = selection === 'card';
+    conversation.session.wizardCardMode = selection === 'card';
     await ctx.reply(selection === 'card' ? '💳 Starting card info collection wizard...' : '💵 Starting payment call wizard...');
-    await ctx.conversation.enter('payment-flow');
+    await conversation.enter('payment-flow');
   } else {
     await ctx.reply('❌ Unknown selection. Please try /call again.');
   }
