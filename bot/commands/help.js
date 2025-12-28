@@ -16,10 +16,8 @@ module.exports = (bot) => {
             // Build help text using HTML formatting (more reliable)
             let helpText = `📱 <b>Basic Commands</b>
 • /start - Restart bot &amp; show main menu
-• /call - Start a new voice call
+• /call - Start a new voice call (choose Personal, Verification, Payment, or Card)
 • /sms - Send an SMS message
-• /otp - Place an OTP verification call (choose template or custom)
-• /payment - Place a payment collection call (amount/link, optional card last4)
 • /miniapp - Open web app for advanced actions
 • /smsconversation &lt;phone&gt; - View SMS conversation
 • /transcript &lt;call_sid&gt; - Get call transcript
@@ -69,8 +67,6 @@ module.exports = (bot) => {
 
             const kb = new InlineKeyboard()
                 .text('📞 Call', 'CALL')
-                .text('🔐 OTP', 'OTP')
-                .text('💳 Pay', 'PAYMENT')
                 .text('📋 Menu', 'MENU')
                 .row()
                 .text('💬 SMS', 'SMS')

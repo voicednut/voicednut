@@ -126,14 +126,17 @@ async function cancelActiveFlow(ctx, reason = 'reset') {
   ctx.session.flow = null;
 }
 
-function resetSession(ctx) {
+async function resetSession(ctx, reason = 'reset') {
   ensureSession(ctx);
+  await cancelActiveFlow(ctx, reason);
   ctx.session.currentOp = null;
   ctx.session.lastCommand = null;
   ctx.session.meta = {};
   ctx.session.pendingControllers = [];
   ctx.session.flow = null;
   ctx.session.errors = [];
+  ctx.session.wizardCategory = null;
+  ctx.session.wizardCardMode = null;
 }
 
 function ensureOperationActive(ctx, opId) {
@@ -180,8 +183,7 @@ async function safeReset(ctx, reason = 'reset', options = {}) {
   } = options;
 
   ensureSession(ctx);
-  await cancelActiveFlow(ctx, reason);
-  resetSession(ctx);
+  await resetSession(ctx, reason);
 
   if (!notify) {
     return;

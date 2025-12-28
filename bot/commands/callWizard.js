@@ -1,4 +1,5 @@
 const { InlineKeyboard } = require('grammy');
+const { isSlashCommandInput } = require('../utils/sessionState');
 const { getUser, setWizardState } = require('../db/db');
 
 async function callWizardFlow(conversation, ctx) {
@@ -21,6 +22,11 @@ async function callWizardFlow(conversation, ctx) {
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const update = await conversation.wait();
+    const text = update?.message?.text;
+    if (isSlashCommandInput(text)) {
+      // Another command took over; stop this wizard quietly
+      return;
+    }
     const data = update?.callback_query?.data;
     if (data && data.startsWith('call:')) {
       selection = data.replace('call:', '');

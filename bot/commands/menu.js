@@ -9,7 +9,7 @@ module.exports = (bot) => {
         try {
             // Check user authorization
             await cancelActiveFlow(ctx, 'command:/menu');
-            resetSession(ctx);
+            await resetSession(ctx, 'command:/menu');
 
             const user = await new Promise(r => getUser(ctx.from.id, r));
             if (!user) {
@@ -25,8 +25,6 @@ module.exports = (bot) => {
             }
 
             kb.text('📞 Call Center', 'CALL')
-            .text('💳 Pay', 'PAYMENT')
-            .text('🔐 OTP', 'OTP')
             .text('💬 SMS', 'SMS')
             .row()
             .text('📋 Calls', 'CALLS')

@@ -213,24 +213,15 @@ bot.use(async (ctx, next) => {
     return next();
 });
 
-// When a new slash command arrives, cancel any active flow first
+// Any slash command resets the current session/conversation before handing off
 bot.use(async (ctx, next) => {
-    const text = ctx.message?.text || ctx.callbackQuery?.data;
-    if (text && text.startsWith('/')) {
+    const text = ctx.message?.text;
+    if (text && text.trim().startsWith('/')) {
         const command = text.split(' ')[0].toLowerCase();
-        if (command !== '/cancel') {
-            await cancelActiveFlow(ctx, `command:${command}`);
-        }
+        await resetSession(ctx, `command:${command}`);
         ctx.session.lastCommand = command;
-        ctx.session.currentOp = null;
     }
     return next();
-});
-
-bot.command('cancel', async (ctx) => {
-    await cancelActiveFlow(ctx, 'user:/cancel');
-    resetSession(ctx);
-    await ctx.reply('✅ Current action cancelled. Use /menu to start again.');
 });
 
 // Initialize conversations middleware AFTER session
@@ -340,8 +331,8 @@ const {
     updateProvider,
     SUPPORTED_PROVIDERS,
 } = require('./commands/provider');
-const { otpFlow, registerOtpCommand } = require('./commands/otp');
-const { paymentFlow, registerPaymentCommand } = require('./commands/payment');
+const { otpFlow } = require('./commands/otp');
+const { paymentFlow } = require('./commands/payment');
 const {
     fetchPending: fetchPendingNotifications,
     markNotification,
@@ -731,7 +722,7 @@ bot.command('start', async (ctx) => {
 });
 
 // Enhanced callback query handler
-bot.on('callback_query:data', async (ctx) => {
+bot.on('callback_query:data', async (ctx, next) => {
     try {
         // Answer callback query immediately to prevent timeout
         await ctx.answerCallbackQuery();
@@ -758,7 +749,7 @@ bot.on('callback_query:data', async (ctx) => {
                 await ctx.reply('⚠️ That template action has expired. Please run /templates and try again.');
                 return;
             }
-            return;
+            return next();
         }
 
         // Verify user authorization
@@ -782,7 +773,7 @@ bot.on('callback_query:data', async (ctx) => {
 
         if (action.startsWith('FOLLOWUP_CALL:')) {
             await cancelActiveFlow(ctx, `callback:${action}`);
-            resetSession(ctx);
+            await resetSession(ctx, `callback:${action}`);
             const [, callSid, followAction] = action.split(':');
             await handleCallFollowUp(ctx, callSid, followAction || 'recap');
             return;
@@ -790,7 +781,7 @@ bot.on('callback_query:data', async (ctx) => {
 
         if (action.startsWith('FOLLOWUP_SMS:')) {
             await cancelActiveFlow(ctx, `callback:${action}`);
-            resetSession(ctx);
+            await resetSession(ctx, `callback:${action}`);
             const [, phone, followAction] = action.split(':');
             await handleSmsFollowUp(ctx, phone, followAction || 'new');
             return;
@@ -799,16 +790,16 @@ bot.on('callback_query:data', async (ctx) => {
         if (action.startsWith('PROVIDER_SET:')) {
             const [, provider] = action.split(':');
             await cancelActiveFlow(ctx, `callback:${action}`);
-            resetSession(ctx);
+            await resetSession(ctx, `callback:${action}`);
             await executeProviderSwitchCommand(ctx, provider?.toLowerCase());
             return;
         }
 
         // Handle conversation actions
         const conversations = {
-            'CALL': 'call-conversation',
-            'OTP': 'otp-flow',
-            'PAYMENT': 'payment-flow',
+            'CALL': 'call-wizard',
+            'OTP': 'call-wizard',
+            'PAYMENT': 'call-wizard',
             'ADDUSER': 'adduser-conversation',
             'PROMOTE': 'promote-conversation',
             'REMOVE': 'remove-conversation',
@@ -829,7 +820,7 @@ bot.on('callback_query:data', async (ctx) => {
 
         // Handle direct command actions
         await cancelActiveFlow(ctx, `callback:${action}`);
-        resetSession(ctx);
+        await resetSession(ctx, `callback:${action}`);
 
         switch (action) {
             case 'HELP':
@@ -853,7 +844,7 @@ bot.on('callback_query:data', async (ctx) => {
                 
             case 'MENU':
                 await cancelActiveFlow(ctx, 'callback:MENU');
-                resetSession(ctx);
+                await resetSession(ctx, 'callback:MENU');
                 await executeMenuCommand(ctx, isAdminUser);
                 break;
                 

@@ -3414,6 +3414,7 @@ app.post('/webhook/amd-status', async (req, res) => {
 // Enhanced webhook endpoint for call status updates
 
 app.post('/webhook/call-status', async (req, res) => {
+  // Twilio expects a 200 quickly; respond before any async work
   if (!res.headersSent) {
     res.status(200).send('OK');
   }
@@ -3424,28 +3425,28 @@ app.post('/webhook/call-status', async (req, res) => {
   }
 
   setImmediate(async () => {
-    const signature = req.headers['x-twilio-signature'];
-    const url = `${publicHttpBase}${req.originalUrl}`;
-    const valid = twilioLib.validateRequest(twilioAuthToken, signature, url, req.body || {});
-    if (!valid) {
-      console.warn('⚠️ Invalid Twilio signature for call-status webhook');
-      return;
-    }
-
     try {
-      const { 
-        CallSid, 
-        CallStatus, 
-        Duration, 
-        From, 
-        To, 
+      const signature = req.headers['x-twilio-signature'];
+      const url = `${publicHttpBase}${req.originalUrl}`;
+      const valid = twilioLib.validateRequest(twilioAuthToken, signature, url, req.body || {});
+      if (!valid) {
+        console.warn('⚠️ Invalid Twilio signature for call-status webhook');
+        return;
+      }
+
+      const {
+        CallSid,
+        CallStatus,
+        Duration,
+        From,
+        To,
         CallDuration,
         AnsweredBy,
         ErrorCode,
         ErrorMessage,
-        DialCallDuration // This is key for detecting actual answer vs no-answer
-      } = req.body;
-      
+        DialCallDuration
+      } = req.body || {};
+
       if (!CallSid) {
         console.warn('⚠️ Status webhook missing CallSid');
         return;
@@ -3457,31 +3458,22 @@ app.post('/webhook/call-status', async (req, res) => {
         if (normalized === 'queued') return 'initiated';
         if (normalized === 'no_answer') return 'no-answer';
         if (normalized === 'in-progress') return 'in-progress';
-        const supported = [
-          'initiated',
-          'ringing',
-          'answered',
-          'completed',
-          'busy',
-          'no-answer',
-          'canceled',
-          'failed'
-        ];
+        const supported = ['initiated', 'ringing', 'answered', 'completed', 'busy', 'no-answer', 'canceled', 'failed', 'in-progress'];
         if (supported.includes(normalized)) {
           return normalized;
         }
         return normalized || 'initiated';
       };
 
-      const callConfig = callConfigurations.get(CallSid) || {};
       const normalizedStatus = normalizeStatus(CallStatus);
-      const durationValue = parseInt(Duration || CallDuration || DialCallDuration || 0);
+      const callConfig = callConfigurations.get(CallSid) || {};
+      const durationValue = Number.parseInt(Duration || CallDuration || DialCallDuration || 0, 10) || 0;
       const updateData = {
         duration: durationValue,
         twilio_status: CallStatus,
         answered_by: AnsweredBy,
         error_code: ErrorCode,
-        error_message: ErrorMessage,
+        error_message: ErrorMessage
       };
 
       let call = null;
@@ -3516,71 +3508,63 @@ app.post('/webhook/call-status', async (req, res) => {
             metadata_json: callConfig.metadata_json || null
           });
           call = await db.getCall(CallSid);
-          if (call) {
-            console.log(`ℹ️ Created placeholder call record for ${CallSid}`.yellow);
-          }
         } catch (createError) {
           console.warn(`⚠️ Unable to create placeholder call for ${CallSid}: ${createError.message}`);
         }
       }
 
       const resolvedCallType = call?.call_type || callConfig.call_type || 'service';
-      const targetChat = call?.telegram_chat_id || call?.user_chat_id || callConfig.telegram_chat_id || callConfig.user_chat_id;
+      const targetChat =
+        call?.telegram_chat_id || call?.user_chat_id || callConfig.telegram_chat_id || callConfig.user_chat_id || null;
+
+      const enqueueStatus = async (type, payloadData = null, priority = 'normal') => {
+        if (!targetChat) {
+          return;
+        }
+        const payload = payloadData ? JSON.stringify(payloadData) : null;
+        try {
+          await db.createEnhancedWebhookNotification(CallSid, type, targetChat, priority, payload);
+        } catch (notifyError) {
+          console.warn(`⚠️ Failed to enqueue ${type} for ${CallSid}: ${notifyError.message}`);
+        }
+      };
+
+      const basePayload = {
+        status: normalizedStatus,
+        to: To || call?.phone_number || null,
+        from: From || callConfig.from || null,
+        call_type: resolvedCallType,
+        received_at: nowIso
+      };
 
       console.log(`📱 Webhook: ${CallSid} status: ${normalizedStatus} @ ${nowIso}`.blue);
-      console.log(`📊 Debug Info (${resolvedCallType}):`.cyan);
-      console.log(`   Duration: ${Duration || 'N/A'}`);
-      console.log(`   CallDuration: ${CallDuration || 'N/A'}`);
-      console.log(`   DialCallDuration: ${DialCallDuration || 'N/A'}`);
-      console.log(`   AnsweredBy: ${AnsweredBy || 'N/A'}`);
-      
+
       if (['answered', 'in-progress'].includes(normalizedStatus) || (normalizedStatus === 'completed' && durationValue > 0)) {
         updateData.was_answered = 1;
         if (call && !call.started_at) {
           updateData.started_at = new Date().toISOString();
         }
-        if (targetChat) {
-          await db.createEnhancedWebhookNotification(CallSid, 'call_answered', targetChat, 'high', JSON.stringify({ to: To, from: From }));
+        await enqueueStatus('call_answered', { ...basePayload, status: 'answered' }, 'high');
+        if (normalizedStatus === 'in-progress') {
+          await enqueueStatus('call_in_progress', { ...basePayload, status: 'in-progress' }, 'normal');
         }
-      } else if (normalizedStatus === 'ringing' && targetChat) {
-        await db.createEnhancedWebhookNotification(CallSid, 'call_ringing', targetChat, 'high', JSON.stringify({ to: To, from: From }));
+      } else if (normalizedStatus === 'ringing') {
+        await enqueueStatus('call_ringing', basePayload, 'high');
+      } else if (['queued', 'initiated'].includes(normalizedStatus)) {
+        await enqueueStatus('call_initiated', basePayload, 'normal');
       }
 
       if (['completed', 'no-answer', 'failed', 'busy', 'canceled'].includes(normalizedStatus)) {
         if (call && !call.ended_at) {
           updateData.ended_at = new Date().toISOString();
         }
-        if (targetChat) {
-          await db.createEnhancedWebhookNotification(
-            CallSid,
-            'call_ended',
-            targetChat,
-            'normal',
-            JSON.stringify({ status: normalizedStatus, duration: durationValue })
-          );
-        }
+        await enqueueStatus(`call_${normalizedStatus.replace('-', '_')}`, { ...basePayload, duration: durationValue });
       }
 
       if (normalizedStatus === 'no-answer' && call?.created_at) {
         const callStart = new Date(call.created_at);
         const now = new Date();
         updateData.ring_duration = Math.round((now - callStart) / 1000);
-      }
-
-      // Always enqueue a status-specific Telegram notification for unified lifecycle states
-      const unifiedStatuses = ['initiated', 'ringing', 'answered', 'in-progress', 'completed', 'busy', 'no-answer', 'canceled', 'failed'];
-      if (targetChat && unifiedStatuses.includes(normalizedStatus)) {
-        const notificationType = `call_${normalizedStatus.replace('-', '_')}`;
-        const payload = JSON.stringify({
-          status: normalizedStatus,
-          call_type: resolvedCallType,
-          received_at: nowIso
-        });
-        try {
-          await db.createEnhancedWebhookNotification(CallSid, notificationType, targetChat, 'normal', payload);
-        } catch (notifyError) {
-          console.warn(`⚠️ Failed to enqueue status notification for ${CallSid}: ${notifyError.message}`);
-        }
       }
 
       const stateMap = {
@@ -3596,10 +3580,6 @@ app.post('/webhook/call-status', async (req, res) => {
         canceled: ORCHESTRATOR_STATES.FAIL
       };
       const mappedState = stateMap[normalizedStatus] || normalizedStatus.toUpperCase();
-      const latestSameState = await db.getLatestCallState(CallSid, mappedState);
-      if (latestSameState) {
-        return;
-      }
 
       if (call) {
         await db.updateCallStatus(CallSid, normalizedStatus, updateData);
@@ -3611,26 +3591,6 @@ app.post('/webhook/call-status', async (req, res) => {
         duration: durationValue,
         call_type: resolvedCallType,
         received_at: nowIso
-      });
-      const orchestratorState =
-        normalizedStatus === 'ringing'
-          ? ORCHESTRATOR_STATES.RINGING
-          : normalizedStatus === 'answered'
-            ? ORCHESTRATOR_STATES.ANSWERED
-            : normalizedStatus === 'in-progress'
-              ? ORCHESTRATOR_STATES.IN_PROGRESS
-              : ['completed'].includes(normalizedStatus)
-                ? ORCHESTRATOR_STATES.COMPLETED
-                : ['busy', 'failed', 'canceled', 'no-answer'].includes(normalizedStatus)
-                  ? ORCHESTRATOR_STATES.FAIL
-                  : ORCHESTRATOR_STATES.INITIATED;
-      await transitionCallState(CallSid, orchestratorState, {
-        provider_status: CallStatus,
-        call_type: resolvedCallType,
-        to: To,
-        from: From,
-        answered_by: AnsweredBy || null,
-        duration: durationValue
       });
 
       await callHintStateMachine.handleTwilioStatus(CallSid, normalizedStatus, {
@@ -3647,31 +3607,11 @@ app.post('/webhook/call-status', async (req, res) => {
         await finalizeCollectInputCall(CallSid, call);
       }
 
-    const enqueueStatus = async (type, payloadData = null) => {
-      if (!targetChat) {
-        return;
-      }
-      const payload = payloadData ? JSON.stringify(payloadData) : null;
-      await db.createEnhancedWebhookNotification(CallSid, type, targetChat, 'normal', payload);
-    };
-
-    if (['queued', 'initiated'].includes(normalizedStatus)) {
-      await enqueueStatus('call_initiated', {
-        status: normalizedStatus,
-        to: To,
-        from: From,
-        call_type: resolvedCallType
-      });
-    } else if (normalizedStatus === 'ringing') {
-      await enqueueStatus('call_ringing');
-    } else if (normalizedStatus === 'answered') {
-      await enqueueStatus('call_answered');
-    } else if (normalizedStatus === 'in-progress') {
-        await enqueueStatus('call_in_progress');
-      } else if (['busy', 'failed', 'canceled', 'completed', 'no-answer'].includes(normalizedStatus)) {
+      if (['busy', 'failed', 'canceled', 'completed', 'no-answer'].includes(normalizedStatus)) {
         await finalizeCallOutcome(CallSid, {
+          call: call || undefined,
           finalStatus: normalizedStatus,
-          answeredBy: AnsweredBy,
+          answeredBy: AnsweredBy
         });
       }
 
@@ -3685,13 +3625,11 @@ app.post('/webhook/call-status', async (req, res) => {
       });
     } catch (error) {
       console.error('❌ Error processing fixed call status webhook:', error);
-      
-      // Log error to service health
       try {
         await db.logServiceHealth('webhook_system', 'error', {
           operation: 'process_webhook',
           error: error.message,
-          call_sid: req.body.CallSid
+          call_sid: req.body?.CallSid
         });
       } catch (logError) {
         console.error('Failed to log webhook error:', logError);

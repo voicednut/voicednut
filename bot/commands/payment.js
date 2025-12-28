@@ -176,11 +176,6 @@ async function paymentFlow(conversation, ctx) {
   }
 }
 
-function registerPaymentCommand(bot) {
-  // Deprecated; unified under /call
-}
-
 module.exports = {
   paymentFlow,
-  registerPaymentCommand,
 };

@@ -44,6 +44,15 @@ function ensureNumber(name, fallback) {
   return Number(value);
 }
 
+function ensureRequired(name, providerLabel) {
+  const value = readEnv(name);
+  if (value !== undefined) {
+    return value;
+  }
+  const providerNote = providerLabel ? ` for ${providerLabel}` : '';
+  throw new Error(`Missing required environment variable "${name}"${providerNote}.`);
+}
+
 function loadPrivateKey(rawValue) {
   if (!rawValue) {
     return undefined;
@@ -153,8 +162,6 @@ const awsPinpointOriginationNumber =
 if (isAwsProvider && !awsPinpointOriginationNumber) {
   throw new Error('Missing required environment variable "AWS_PINPOINT_ORIGINATION_NUMBER" or "AWS_CONNECT_SOURCE_PHONE_NUMBER" for provider "aws".');
 }
-
-const statusCallbackEvents = ['initiated', 'ringing', 'answered', 'completed'];
 
 module.exports = {
   platform: {

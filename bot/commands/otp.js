@@ -331,11 +331,6 @@ async function otpFlow(conversation, ctx) {
   }
 }
 
-function registerOtpCommand(bot) {
-  // Deprecated; unified under /call
-}
-
 module.exports = {
   otpFlow,
-  registerOtpCommand,
 };
