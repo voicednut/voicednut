@@ -617,14 +617,18 @@ bot.on('callback_query:data', async (ctx) => {
             !action.startsWith('FOLLOWUP_SMS:') &&
             !action.startsWith('PROVIDER_SET:');
         if (isConversationCallback) {
-            // Allow the conversations middleware to handle this callback without side effects
-            return;
-        }
-
-        // Gracefully handle expired template designer callbacks instead of showing generic errors
-        const lowerAction = action.toLowerCase();
-        if (lowerAction.startsWith('call-template') || lowerAction.startsWith('sms-template') || lowerAction.startsWith('confirm')) {
-            await ctx.reply('⚠️ That template action has expired. Please run /templates and try again.');
+            // If we're currently in a templates flow (or any flow), let the conversation handle it.
+            const activeCommand = ctx.session?.currentOp?.command || ctx.session?.lastCommand || '';
+            const lowerAction = action.toLowerCase();
+            const isTemplateAction =
+                lowerAction.startsWith('call-template') ||
+                lowerAction.startsWith('sms-template') ||
+                lowerAction.startsWith('template-category') ||
+                lowerAction.startsWith('confirm');
+            if (isTemplateAction && !activeCommand.includes('template')) {
+                await ctx.reply('⚠️ That template action has expired. Please run /templates and try again.');
+                return;
+            }
             return;
         }
 
