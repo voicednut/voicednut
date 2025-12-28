@@ -8,7 +8,6 @@ const {
   isSensitiveStage,
   getRawDigits,
 } = require('../utils/dtmf');
-const config = require('../config');
 
 function parseDtmfMetadata(metadata) {
   if (!metadata) {
