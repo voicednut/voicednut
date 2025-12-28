@@ -1,0 +1,12 @@
+#!/bin/bash
+
+# Pre-commit hook: Check for process.env outside config.js
+echo "🔍 Checking for process.env usage outside config.js..."
+cd api && npm run check-env
+if [ $? -ne 0 ]; then
+  echo "❌ process.env check failed"
+  exit 1
+fi
+cd ..
+
+echo "✅ Pre-commit checks passed"

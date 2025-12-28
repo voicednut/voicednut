@@ -286,6 +286,8 @@ bot.catch((err) => {
 // Poll and post pending webhook notifications as styled call feeds
 const lastSentByCall = new Map();
 const lastSentAtByCall = new Map();
+const lastCallbackTimeByUser = new Map();  // NEW: Track last callback time for debouncing
+const CALLBACK_DEBOUNCE_MS = 800;  // NEW: Debounce rapid callbacks to 800ms
 
 async function sendHeaderIfMissing(notif, payload) {
     const existingThread = await getCallThread(notif.call_sid);
@@ -406,7 +408,7 @@ const {
     updateProvider,
     SUPPORTED_PROVIDERS,
 } = require('./commands/provider');
-const { otpFlow, paymentFlow } = require('./commands/callFlows');
+// NOTE: otpFlow and paymentFlow removed - unified under /call command
 const {
     fetchPending: fetchPendingNotifications,
     markNotification,
@@ -434,8 +436,7 @@ bot.use(wrapConversation(smsFlow, "sms-conversation"));
 bot.use(wrapConversation(bulkSmsFlow, "bulk-sms-conversation"));
 bot.use(wrapConversation(templatesFlow, "templates-conversation"));
 bot.use(wrapConversation(personaFlow, "persona-conversation"));
-bot.use(wrapConversation(otpFlow, "otp-flow"));
-bot.use(wrapConversation(paymentFlow, "payment-flow"));
+// NOTE: /otp and /payment flows removed - unified under /call command
 
 // Register command handlers
 registerCallWizardCommand(bot);
@@ -800,6 +801,17 @@ bot.on('callback_query:data', async (ctx, next) => {
         await ctx.answerCallbackQuery();
 
         const action = ctx.callbackQuery.data;
+        const userId = ctx.from.id.toString();
+        const now = Date.now();
+        
+        // NEW: Debounce rapid button clicks (prevent duplicate commands)
+        const lastCallbackTime = lastCallbackTimeByUser.get(userId) || 0;
+        if (now - lastCallbackTime < CALLBACK_DEBOUNCE_MS) {
+            console.log(`⏱️ Callback debounced for user ${userId} (${action})`);
+            return;
+        }
+        lastCallbackTimeByUser.set(userId, now);
+
         console.log(`Callback query received: ${action} from user ${ctx.from.id}`);
 
         // Let conversation-specific callbacks (prefixed with data:) pass through unless explicitly handled below

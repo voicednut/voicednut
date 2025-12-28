@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node bot.js",
     "dev": "nodemon bot.js",
-    "setup": "node setup-env.js"
+    "setup": "node setup-env.js",
+    "lint": "eslint . --ignore-pattern=node_modules",
+    "lint:fix": "eslint . --fix --ignore-pattern=node_modules"
   },
   "dependencies": {
     "@grammyjs/conversations": "^1.2.0",

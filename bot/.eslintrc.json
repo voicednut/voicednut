@@ -1,0 +1,41 @@
+{
+  "env": {
+    "node": true,
+    "es2020": true
+  },
+  "extends": "eslint:recommended",
+  "parserOptions": {
+    "ecmaVersion": 2020,
+    "sourceType": "module"
+  },
+  "rules": {
+    "no-console": ["warn", { "allow": ["warn", "error", "log"] }],
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_" }],
+    "no-process-env": "off",
+    "no-undef": "error",
+    "semi": ["error", "always"],
+    "quotes": ["warn", "single", { "avoidEscape": true }],
+    "indent": ["warn", 2],
+    "eqeqeq": ["error", "always"],
+    "no-var": "error",
+    "prefer-const": "warn",
+    "curly": ["error", "multi-line"],
+    "brace-style": ["warn", "1tbs"],
+    "keyword-spacing": ["warn", { "before": true, "after": true }],
+    "space-before-function-paren": ["warn", { "anonymous": "always", "named": "never", "asyncArrow": "always" }],
+    "no-trailing-spaces": "warn",
+    "comma-dangle": ["warn", "never"],
+    "object-curly-spacing": ["warn", "always"],
+    "array-bracket-spacing": ["warn", "never"],
+    "no-multiple-empty-lines": ["warn", { "max": 2 }],
+    "no-unhandled-rejection": "off"
+  },
+  "overrides": [
+    {
+      "files": ["config.js"],
+      "rules": {
+        "no-process-env": "off"
+      }
+    }
+  ]
+}

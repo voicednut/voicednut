@@ -413,6 +413,21 @@ class EnhancedDatabase {
                 failed_calls INTEGER DEFAULT 0,
                 total_duration INTEGER DEFAULT 0,
                 last_activity DATETIME DEFAULT CURRENT_TIMESTAMP
+            )`,
+
+            // Webhook deduplication - prevents duplicate processing of same event
+            `CREATE TABLE IF NOT EXISTS webhook_dedupe (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_sid TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                event_hash TEXT NOT NULL UNIQUE,
+                provider TEXT,
+                received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                processed_at DATETIME,
+                status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'complete', 'failed')),
+                error_message TEXT,
+                retry_count INTEGER DEFAULT 0,
+                FOREIGN KEY(call_sid) REFERENCES calls(call_sid)
             )`
         ];
 
@@ -498,6 +513,12 @@ class EnhancedDatabase {
             'CREATE INDEX IF NOT EXISTS idx_states_call_sid ON call_states(call_sid)',
             'CREATE INDEX IF NOT EXISTS idx_states_timestamp ON call_states(timestamp)',
             'CREATE INDEX IF NOT EXISTS idx_states_state ON call_states(state)',
+            
+            // Webhook deduplication indexes
+            'CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_dedupe_hash ON webhook_dedupe(event_hash)',
+            'CREATE INDEX IF NOT EXISTS idx_webhook_dedupe_call_sid ON webhook_dedupe(call_sid)',
+            'CREATE INDEX IF NOT EXISTS idx_webhook_dedupe_status ON webhook_dedupe(status)',
+            'CREATE INDEX IF NOT EXISTS idx_webhook_dedupe_received_at ON webhook_dedupe(received_at)',
             'CREATE INDEX IF NOT EXISTS idx_call_events_call_sid ON call_events(call_sid)',
             'CREATE INDEX IF NOT EXISTS idx_call_events_created_at ON call_events(call_sid, created_at)',
             
@@ -2547,6 +2568,89 @@ class EnhancedDatabase {
                    
                    resolve(metrics);
                }
+           });
+       });
+   }
+
+   // WEBHOOK DEDUPLICATION METHODS
+   async checkWebhookDuplicate(callSid, eventType, eventHash) {
+       return new Promise((resolve, reject) => {
+           this.db.get(
+               `SELECT id, status FROM webhook_dedupe WHERE event_hash = ? AND call_sid = ?`,
+               [eventHash, callSid],
+               (err, row) => {
+                   if (err) reject(err);
+                   else resolve(row || null);
+               }
+           );
+       });
+   }
+
+   async recordWebhookEvent(callSid, eventType, eventHash, provider = 'twilio') {
+       return new Promise((resolve, reject) => {
+           this.db.run(
+               `INSERT OR IGNORE INTO webhook_dedupe (call_sid, event_type, event_hash, provider, status)
+                VALUES (?, ?, ?, ?, 'pending')`,
+               [callSid, eventType, eventHash, provider],
+               function(err) {
+                   if (err) reject(err);
+                   else resolve(this.lastID);
+               }
+           );
+       });
+   }
+
+   async markWebhookProcessed(eventHash, success = true, errorMessage = null) {
+       return new Promise((resolve, reject) => {
+           this.db.run(
+               `UPDATE webhook_dedupe 
+                SET status = ?, processed_at = CURRENT_TIMESTAMP, error_message = ?
+                WHERE event_hash = ?`,
+               [success ? 'complete' : 'failed', errorMessage, eventHash],
+               (err) => {
+                   if (err) reject(err);
+                   else resolve();
+               }
+           );
+       });
+   }
+
+   async retryWebhookEvent(eventHash) {
+       return new Promise((resolve, reject) => {
+           this.db.run(
+               `UPDATE webhook_dedupe 
+                SET status = 'pending', retry_count = retry_count + 1
+                WHERE event_hash = ? AND retry_count < 5`,
+               [eventHash],
+               (err) => {
+                   if (err) reject(err);
+                   else resolve();
+               }
+           );
+       });
+   }
+
+   // TRANSACTION SUPPORT FOR ATOMIC OPERATIONS
+   async runTransaction(callback) {
+       return new Promise((resolve, reject) => {
+           this.db.serialize(() => {
+               this.db.run('BEGIN TRANSACTION', async (err) => {
+                   if (err) {
+                       reject(err);
+                       return;
+                   }
+                   try {
+                       const result = await callback();
+                       this.db.run('COMMIT', (commitErr) => {
+                           if (commitErr) reject(commitErr);
+                           else resolve(result);
+                       });
+                   } catch (callbackErr) {
+                       this.db.run('ROLLBACK', () => {
+                           reject(callbackErr);
+                       });
+                   }
+               });
            });
        });
    }

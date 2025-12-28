@@ -9,7 +9,9 @@
     "dev": "npm run db:migrate && nodemon app.js",
     "start": "npm run db:migrate && node app.js",
     "setup": "node setup-env.js",
-    "lint:env": "node scripts/check-env.js"
+    "check-env": "node scripts/check-env.js",
+    "lint": "eslint . --ignore-pattern=node_modules",
+    "lint:fix": "eslint . --fix --ignore-pattern=node_modules"
   },
   "keywords": [],
   "author": "Tunde Ednut",
