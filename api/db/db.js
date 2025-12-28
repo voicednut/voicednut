@@ -188,6 +188,16 @@ class EnhancedDatabase {
                 name: 'add_call_inputs_updated_at',
                 sql: 'ALTER TABLE call_inputs ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                 ignoreErrors: ['duplicate column']
+            },
+            {
+                name: 'add_call_inputs_is_valid',
+                sql: 'ALTER TABLE call_inputs ADD COLUMN is_valid INTEGER DEFAULT 1',
+                ignoreErrors: ['duplicate column']
+            },
+            {
+                name: 'add_call_inputs_label',
+                sql: 'ALTER TABLE call_inputs ADD COLUMN label TEXT',
+                ignoreErrors: ['duplicate column']
             }
         ];
 
@@ -288,9 +298,11 @@ class EnhancedDatabase {
                 step INTEGER NOT NULL,
                 input_type TEXT NOT NULL CHECK(input_type IN ('speech','digit')),
                 value TEXT NOT NULL,
+                label TEXT,
                 confidence REAL,
                 digits_len INTEGER,
                 retry_count INTEGER DEFAULT 0,
+                is_valid INTEGER DEFAULT 1,
                 captured_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(call_sid) REFERENCES calls(call_sid)
@@ -1266,16 +1278,18 @@ class EnhancedDatabase {
             confidence = null,
             digits_len = null,
             retry_count = 0,
-            updated_at = new Date().toISOString()
+            updated_at = new Date().toISOString(),
+            is_valid = 1,
+            label = null
         } = entry;
 
         return new Promise((resolve, reject) => {
             const stmt = this.db.prepare(`
-                INSERT INTO call_inputs (call_sid, step, input_type, value, confidence, digits_len, retry_count, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO call_inputs (call_sid, step, input_type, value, label, confidence, digits_len, retry_count, is_valid, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `);
 
-            stmt.run([call_sid, step, input_type, value, confidence, digits_len, retry_count, updated_at], function(err) {
+            stmt.run([call_sid, step, input_type, value, label, confidence, digits_len, retry_count, is_valid, updated_at], function(err) {
                 if (err) {
                     reject(err);
                 } else {

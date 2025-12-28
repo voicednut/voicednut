@@ -1170,6 +1170,38 @@ function normalizeInputSequencePayload(rawSequence, fallbackDigits = 4) {
   });
 }
 
+function buildInputSteps(callConfig = {}, metadata = {}) {
+  const sequenceFromConfig = Array.isArray(callConfig.collect_input_sequence) ? callConfig.collect_input_sequence : null;
+  const sequenceFromMetadata = Array.isArray(metadata.input_sequence) ? metadata.input_sequence : null;
+  const baseSequence = (sequenceFromConfig && sequenceFromConfig.length)
+    ? sequenceFromConfig
+    : (sequenceFromMetadata && sequenceFromMetadata.length)
+      ? sequenceFromMetadata
+      : getDefaultInputSequence(callConfig.collect_digits || 4);
+
+  return baseSequence.map((rawStep, index) => {
+    const stepId = rawStep.stage || rawStep.stepId || `STEP_${index + 1}`;
+    const expectedLen = Number(rawStep.numDigits || rawStep.expectedLen || rawStep.minLen || rawStep.maxLen || 0);
+    const minLen = rawStep.minLen ? Number(rawStep.minLen) : (expectedLen || null);
+    const maxLen = rawStep.maxLen ? Number(rawStep.maxLen) : (expectedLen || null);
+    return {
+      stepId,
+      label: rawStep.label || stepId,
+      promptText: rawStep.prompt || rawStep.promptText || `Please enter your ${rawStep.label || stepId} now.`,
+      expectedLen: expectedLen || null,
+      minLen: minLen || null,
+      maxLen: maxLen || null,
+      finishOnKey: rawStep.finishOnKey || '#',
+      timeoutSeconds: rawStep.timeout || rawStep.timeoutSeconds || 5,
+      maxRetries: rawStep.maxRetries || rawStep.max_attempts || 3,
+      confirmMode: rawStep.confirmMode || 'length',
+      validationRegex: rawStep.pattern || rawStep.regex || null,
+      successMessage: rawStep.successMessage || 'Received, thank you.',
+      failureMessage: rawStep.failureMessage || 'That did not look valid.',
+    };
+  });
+}
+
 function parseMetadataJson(value) {
   if (!value) return null;
   if (typeof value === 'object') return value;
@@ -1198,13 +1230,20 @@ async function handleCollectInputRequest(req, res, callRecord) {
 
   const callConfig = callConfigurations.get(callSid) || {};
   const metadata = parseMetadataJson(callRecord?.metadata_json) || {};
-  const sequenceFromConfig = Array.isArray(callConfig.collect_input_sequence) ? callConfig.collect_input_sequence : null;
-  const sequenceFromMetadata = Array.isArray(metadata.input_sequence) ? metadata.input_sequence : null;
-  const inputSequence = (sequenceFromConfig && sequenceFromConfig.length)
-    ? sequenceFromConfig
-    : (sequenceFromMetadata && sequenceFromMetadata.length)
-      ? sequenceFromMetadata
-      : getDefaultInputSequence(callConfig.collect_digits || 4);
+  const inputSequence = buildInputSteps(callConfig, metadata);
+  const targetChat =
+    callRecord?.telegram_chat_id ||
+    callRecord?.user_chat_id ||
+    callConfig.telegram_chat_id ||
+    callConfig.user_chat_id ||
+    null;
+  const logEvent = async (eventType, payload = {}) => {
+    try {
+      await recordCallEvent(callSid, eventType, payload);
+    } catch (err) {
+      console.warn(`call_event log failed [${eventType}]:`, err.message);
+    }
+  };
 
   const thankYouMessage = callConfig.collectThankYouMessage
     || 'Thank you for verifying your information. Your data has been securely recorded. Have a great day.';
@@ -1214,78 +1253,222 @@ async function handleCollectInputRequest(req, res, callRecord) {
   const confidence = req.body?.Confidence ? Number(req.body.Confidence) : null;
   const stageParam = parseInt(req.query?.gather_stage || req.body?.GatherStage || '0', 10);
 
-  if (digits || speechResult) {
-    const pendingStep = !Number.isNaN(stageParam) && stageParam > 0
-      ? stageParam
-      : await db.getNextCallInputStep(callSid);
-    const normalizedValue = digits ? String(digits) : String(speechResult);
-    const inputType = digits ? 'digit' : 'speech';
+  const currentIndex = Number.isNaN(stageParam) || stageParam <= 0 ? 0 : stageParam - 1;
+  const currentStep = inputSequence[currentIndex] || inputSequence[inputSequence.length - 1];
 
-    await db.saveCallInput({
-      call_sid: callSid,
-      step: pendingStep,
-      input_type: inputType,
-      value: normalizedValue,
-      confidence: digits ? null : confidence,
-      digits_len: normalizedValue.length,
-      retry_count: 0,
-      updated_at: new Date().toISOString()
-    });
+  // Load attempts for this step
+  const inputs = await db.getCallInputs(callSid);
+  const attemptsForStep = inputs.filter((entry) => entry.step === currentIndex + 1);
+  const attemptCount = attemptsForStep.length;
 
-    await db.markCallHasInput(callSid, normalizedValue);
-
-    if (digits) {
-      const stageConfig = inputSequence[pendingStep - 1] || inputSequence[inputSequence.length - 1];
-      const stageKey = stageConfig?.stage || `STEP_${pendingStep}`;
-      const gatherMetadata = {
-        stage_label: stageConfig?.label,
-        gather_stage: pendingStep,
-        sequence_length: inputSequence.length,
-      };
-      const captureSummary = await persistDtmfCapture(callSid, digits, {
-        source: 'twilio',
-        provider: 'twilio',
-        stage_key: stageKey,
-        stage_label: stageConfig?.label,
-        callInputStep: pendingStep,
-        skipCallInputInsert: true,
-        capture_method: 'twilio_gather',
-        metadata: gatherMetadata,
-      });
-      if (captureSummary) {
-        await evaluateInputStage(callSid, captureSummary, gatherMetadata);
-      }
+  const respondGather = (message, attemptNumber = attemptCount) => {
+    const response = new VoiceResponse();
+    const gatherOptions = {
+      input: 'dtmf',
+      action: `${publicHttpBase}/incoming?CallSid=${encodeURIComponent(callSid)}&gather_stage=${currentIndex + 1}`,
+      method: 'POST',
+      timeout: currentStep.timeoutSeconds || 5
+    };
+    if (currentStep.expectedLen) {
+      gatherOptions.numDigits = Number(currentStep.expectedLen);
+    } else {
+      gatherOptions.finishOnKey = currentStep.finishOnKey || '#';
     }
+    const gather = response.gather(gatherOptions);
+    gather.say(currentStep.promptText || 'Please provide your input now.');
+    if (message) {
+      response.say(message);
+    }
+    if (!currentStep.expectedLen) {
+      response.say('Press # when you are done.');
+    }
+    response.redirect(`${publicHttpBase}/incoming?CallSid=${encodeURIComponent(callSid)}&gather_stage=${currentIndex + 1}`);
+    res.type('text/xml').send(response.toString());
+
+    if (targetChat) {
+      db.createEnhancedWebhookNotification(
+        callSid,
+        'call_input_waiting',
+        targetChat,
+        'high',
+        JSON.stringify({
+          label: currentStep.label,
+          expected_length: currentStep.expectedLen || currentStep.maxLen || null
+        })
+      ).catch((err) => console.warn('notify input_waiting failed', err.message));
+    }
+    logEvent('INPUT_WAITING', {
+      step: currentIndex + 1,
+      label: currentStep.label,
+      expected_length: currentStep.expectedLen || currentStep.maxLen || null,
+      attempt: attemptNumber
+    });
+  };
+
+  const maskValue = (val) => maskDigits(val || '');
+
+  if (!digits && !speechResult) {
+    if (attemptCount >= currentStep.maxRetries) {
+      const response = new VoiceResponse();
+      response.say('We did not receive input. Ending this verification. Goodbye.');
+      response.hangup();
+      res.type('text/xml').send(response.toString());
+      await finalizeCollectInputCall(callSid, callRecord);
+      removeCallConfiguration(callSid);
+      return;
+    }
+    respondGather('No input received, let\'s try again.');
+    return;
   }
 
-  const collectedInputs = await db.getCallInputs(callSid);
-  if (collectedInputs.length >= inputSequence.length) {
+  const normalizedValue = digits ? String(digits) : String(speechResult);
+  const inputType = digits ? 'digit' : 'speech';
+  const lengthOk =
+    (currentStep.expectedLen && normalizedValue.length === Number(currentStep.expectedLen)) ||
+    (!currentStep.expectedLen &&
+      (!currentStep.minLen || normalizedValue.length >= Number(currentStep.minLen || 0)) &&
+      (!currentStep.maxLen || normalizedValue.length <= Number(currentStep.maxLen || 99)));
+  const regexOk = currentStep.validationRegex
+    ? new RegExp(currentStep.validationRegex).test(normalizedValue)
+    : true;
+
+  const isValid = lengthOk && regexOk;
+  const attemptNumber = attemptCount + 1;
+
+  await db.saveCallInput({
+    call_sid: callSid,
+    step: currentIndex + 1,
+    input_type: inputType,
+    value: maskValue(normalizedValue),
+    label: currentStep.label,
+    confidence: inputType === 'digit' ? null : confidence,
+    digits_len: normalizedValue.length,
+    retry_count: attemptNumber - 1,
+    is_valid: isValid ? 1 : 0,
+    updated_at: new Date().toISOString()
+  });
+
+  await db.markCallHasInput(callSid, maskValue(normalizedValue));
+  await logEvent('INPUT_RECEIVED', {
+    step: currentIndex + 1,
+    label: currentStep.label,
+    length: normalizedValue.length,
+    valid: isValid
+  });
+
+  if (!isValid) {
+    if (attemptNumber >= currentStep.maxRetries) {
+      const response = new VoiceResponse();
+      response.say(currentStep.failureMessage || 'That format is not valid. Ending this verification.');
+      response.hangup();
+      res.type('text/xml').send(response.toString());
+      await finalizeCollectInputCall(callSid, callRecord);
+      if (targetChat) {
+        db.createEnhancedWebhookNotification(
+          callSid,
+          'call_input_failed',
+          targetChat,
+          'normal',
+          JSON.stringify({
+            label: currentStep.label,
+            attempts: attemptNumber,
+            max_attempts: currentStep.maxRetries
+          })
+        ).catch((err) => console.warn('notify input_failed failed', err.message));
+      }
+      await logEvent('INPUT_FAILED', {
+        step: currentIndex + 1,
+        label: currentStep.label,
+        attempts: attemptNumber,
+        max_attempts: currentStep.maxRetries
+      });
+      removeCallConfiguration(callSid);
+      return;
+    }
+    respondGather(currentStep.failureMessage || 'That did not look valid. Please try again.');
+    if (targetChat) {
+      db.createEnhancedWebhookNotification(
+        callSid,
+        'call_input_retry',
+        targetChat,
+        'normal',
+        JSON.stringify({
+          label: currentStep.label,
+          attempts: attemptNumber,
+          max_attempts: currentStep.maxRetries
+        })
+      ).catch((err) => console.warn('notify input_retry failed', err.message));
+    }
+    await logEvent('INPUT_RETRY', {
+      step: currentIndex + 1,
+      label: currentStep.label,
+      attempts: attemptNumber,
+      max_attempts: currentStep.maxRetries
+    });
+    return;
+  }
+
+  // Success for this step
+  const successMsg = currentStep.confirmMode === 'length'
+    ? `Received ${normalizedValue.length} digits.`
+    : currentStep.successMessage;
+
+  const nextStepIndex = currentIndex + 1;
+  const hasMoreSteps = nextStepIndex < inputSequence.length;
+
+  if (!hasMoreSteps) {
     const response = new VoiceResponse();
+    response.say(successMsg || 'Thanks, received.');
     response.say(thankYouMessage);
     response.hangup();
     res.type('text/xml').send(response.toString());
     await finalizeCollectInputCall(callSid, callRecord);
+    if (targetChat) {
+      db.createEnhancedWebhookNotification(
+        callSid,
+        'call_input_success',
+        targetChat,
+        'normal',
+        JSON.stringify({
+          label: currentStep.label,
+          length: normalizedValue.length
+        })
+      ).catch((err) => console.warn('notify input_success failed', err.message));
+    }
+    await logEvent('INPUT_COMPLETED', {
+      step: currentIndex + 1,
+      label: currentStep.label,
+      length: normalizedValue.length,
+      terminal: true
+    });
     removeCallConfiguration(callSid);
     return;
   }
 
-  const nextStepIndex = collectedInputs.length;
-  const stepConfig = inputSequence[nextStepIndex] || inputSequence[inputSequence.length - 1];
+  // Move to next step
   const response = new VoiceResponse();
-  const gatherOptions = {
-    input: 'dtmf speech',
-    action: `${publicHttpBase}/incoming?CallSid=${encodeURIComponent(callSid)}&gather_stage=${nextStepIndex + 1}`,
-    method: 'POST',
-    timeout: stepConfig.timeout || 5
-  };
-  if (stepConfig.numDigits) {
-    gatherOptions.numDigits = Number(stepConfig.numDigits);
-  }
-  const gather = response.gather(gatherOptions);
-  gather.say(stepConfig.prompt || 'Please provide your input now.');
-  response.say('No input received, let\'s try again.');
-  response.redirect(`${publicHttpBase}/incoming?CallSid=${encodeURIComponent(callSid)}`);
+  response.say(successMsg || 'Thanks, received.');
+  response.redirect(`${publicHttpBase}/incoming?CallSid=${encodeURIComponent(callSid)}&gather_stage=${nextStepIndex + 1}`);
   res.type('text/xml').send(response.toString());
+
+  if (targetChat) {
+    db.createEnhancedWebhookNotification(
+      callSid,
+      'call_input_success',
+      targetChat,
+      'normal',
+      JSON.stringify({
+        label: currentStep.label,
+        length: normalizedValue.length
+      })
+    ).catch((err) => console.warn('notify input_success failed', err.message));
+  }
+  await logEvent('INPUT_COMPLETED', {
+    step: currentIndex + 1,
+    label: currentStep.label,
+    length: normalizedValue.length,
+    terminal: false
+  });
 }
 
 async function finalizeCollectInputCall(callSid, callDetails) {
@@ -3537,6 +3720,8 @@ app.post('/webhook/call-status', async (req, res) => {
         received_at: nowIso
       };
 
+      await recordCallEvent(CallSid, 'STATUS', { status: normalizedStatus, provider_status: CallStatus, payload: req.body });
+
       console.log(`📱 Webhook: ${CallSid} status: ${normalizedStatus} @ ${nowIso}`.blue);
 
       if (['answered', 'in-progress'].includes(normalizedStatus) || (normalizedStatus === 'completed' && durationValue > 0)) {
@@ -3559,6 +3744,14 @@ app.post('/webhook/call-status', async (req, res) => {
           updateData.ended_at = new Date().toISOString();
         }
         await enqueueStatus(`call_${normalizedStatus.replace('-', '_')}`, { ...basePayload, duration: durationValue });
+        const outcomePayload = {
+          success: normalizedStatus === 'completed',
+          finalStatus: normalizedStatus,
+          reason: normalizedStatus,
+          duration: durationValue,
+          answered_by: AnsweredBy || null
+        };
+        await enqueueStatus('call_final_outcome', outcomePayload, 'normal');
       }
 
       if (normalizedStatus === 'no-answer' && call?.created_at) {

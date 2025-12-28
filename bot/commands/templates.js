@@ -140,9 +140,7 @@ function replacePlaceholders(text = '', values = {}) {
 }
 
 const TEMPLATE_CATEGORIES = [
-  { id: 'call', label: '☎️ Call' },
-  { id: 'otp', label: '🔐 OTP' },
-  { id: 'payment', label: '💳 Payment' }
+  { id: 'call', label: '☎️ Call' }
 ];
 
 async function selectTemplateCategory(conversation, ctx, ensureActive, { allowAll = false } = {}) {
