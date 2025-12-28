@@ -8,6 +8,7 @@ const {
   guardAgainstCommandInterrupt,
 } = require('../utils/sessionState');
 const { askOptionWithButtons } = require('../utils/persona');
+const { setWizardCallSid, clearWizardState } = require('../db/db');
 
 function isValidPhoneNumber(number) {
   const e164 = /^\+[1-9]\d{1,14}$/;
@@ -80,7 +81,7 @@ async function paymentFlow(conversation, ctx) {
     ],
     { prefix: 'collect-card', columns: 2, ensureActive }
   );
-  const collectCard = collectCardChoice?.id === 'yes';
+  const collectCard = ctx.session?.wizardCardMode ? true : collectCardChoice?.id === 'yes';
 
   const prompt = [
     'You are calling to collect a payment over the phone.',
@@ -154,6 +155,12 @@ async function paymentFlow(conversation, ctx) {
         ].join('\n'),
         { parse_mode: 'Markdown' }
       );
+      if (ctx.session?.wizardCategory) {
+        await setWizardCallSid(ctx.from.id, ctx.chat.id, response.data.call_sid);
+        await clearWizardState(ctx.from.id, ctx.chat.id);
+        delete ctx.session.wizardCategory;
+        delete ctx.session.wizardCardMode;
+      }
     } else {
       await ctx.reply('⚠️ Payment call sent but response was unexpected. Check logs.');
     }
@@ -170,10 +177,7 @@ async function paymentFlow(conversation, ctx) {
 }
 
 function registerPaymentCommand(bot) {
-  bot.command('payment', async (ctx) => {
-    await ctx.reply('Starting payment call process…');
-    await ctx.conversation.enter('payment-flow');
-  });
+  // Deprecated; unified under /call
 }
 
 module.exports = {

@@ -15,6 +15,17 @@ db.serialize(() => {
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
   db.run(`INSERT OR IGNORE INTO users (telegram_id, username, role) VALUES (?, ?, 'ADMIN')`, [userId, username]);
+
+  db.run(`CREATE TABLE IF NOT EXISTS call_wizard_state (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL,
+    category TEXT,
+    state_json TEXT,
+    call_sid TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(telegram_id, chat_id)
+  )`);
 });
 
 function getUser(id, cb) {
@@ -51,7 +62,63 @@ function expireInactiveUsers(days = 30) {
   db.run(`DELETE FROM users WHERE timestamp <= datetime('now', ? || ' days')`, [`-${days}`]);
 }
 
+function setWizardState(telegramId, chatId, category, state = {}) {
+  return new Promise((resolve, reject) => {
+    const payload = state ? JSON.stringify(state) : null;
+    db.run(
+      `INSERT INTO call_wizard_state (telegram_id, chat_id, category, state_json, updated_at)
+       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(telegram_id, chat_id) DO UPDATE SET category = excluded.category, state_json = excluded.state_json, updated_at = CURRENT_TIMESTAMP`,
+      [telegramId, chatId, category, payload],
+      function (err) {
+        if (err) reject(err);
+        else resolve(this.changes);
+      }
+    );
+  });
+}
+
+function setWizardCallSid(telegramId, chatId, callSid) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      `UPDATE call_wizard_state SET call_sid = ?, updated_at = CURRENT_TIMESTAMP WHERE telegram_id = ? AND chat_id = ?`,
+      [callSid, telegramId, chatId],
+      function (err) {
+        if (err) reject(err);
+        else resolve(this.changes);
+      }
+    );
+  });
+}
+
+function clearWizardState(telegramId, chatId) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      `DELETE FROM call_wizard_state WHERE telegram_id = ? AND chat_id = ?`,
+      [telegramId, chatId],
+      function (err) {
+        if (err) reject(err);
+        else resolve(this.changes);
+      }
+    );
+  });
+}
+
+function getWizardState(telegramId, chatId) {
+  return new Promise((resolve, reject) => {
+    db.get(
+      `SELECT * FROM call_wizard_state WHERE telegram_id = ? AND chat_id = ?`,
+      [telegramId, chatId],
+      (err, row) => {
+        if (err) reject(err);
+        else resolve(row || null);
+      }
+    );
+  });
+}
+
 module.exports = {
   getUser, addUser, getUserList, promoteUser, removeUser,
-  isAdmin, expireInactiveUsers
+  isAdmin, expireInactiveUsers,
+  setWizardState, setWizardCallSid, clearWizardState, getWizardState
 };

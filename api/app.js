@@ -152,6 +152,16 @@ const DEFAULT_SECURE_INPUT_TEMPLATE = [
   },
 ];
 
+function maskDigits(value) {
+  if (!value) return '';
+  const str = String(value);
+  if (str.length <= 2) {
+    return `${'•'.repeat(Math.max(0, str.length - 1))}${str.slice(-1)}`;
+  }
+  const last = str.slice(-2);
+  return `${'•'.repeat(str.length - 2)}${last}`;
+}
+
 function buildStructuredInputSequence(metadataPayload = {}, fallbackDigits = 4) {
   const stages = [];
   const expectedOtp = metadataPayload.expected_otp || metadataPayload.otp_code || metadataPayload.one_time_passcode;
@@ -878,7 +888,17 @@ async function persistDtmfCapture(callSid, digits, options = {}) {
 
     const targetChatId = callRecord.telegram_chat_id || callRecord.user_chat_id;
     if (callRecord.call_type !== 'collect_input' && targetChatId) {
-      await db.createEnhancedWebhookNotification(callSid, 'call_input_dtmf', targetChatId, 'high');
+      await db.createEnhancedWebhookNotification(
+        callSid,
+        'call_input_dtmf',
+        targetChatId,
+        'high',
+        JSON.stringify({
+          stage: resolvedStageLabel,
+          stage_key: compliancePayload.metadata.stage_key,
+          expected_length: expectedLength || null
+        })
+      );
     }
 
     await db.logServiceHealth('call_system', 'dtmf_captured', {
@@ -1019,7 +1039,17 @@ async function evaluateInputStage(callSid, summary, metadataEnvelope = {}, inter
     if (targetChatId) {
       const notificationType = guidance?.needsRetry ? 'call_step_retry' : 'call_step_complete';
       const priority = guidance?.needsRetry ? 'urgent' : 'high';
-      await db.createEnhancedWebhookNotification(callSid, notificationType, targetChatId, priority);
+      const payload = {
+        stage: summary.stageKey,
+        label: stageDisplay,
+        expected_length: summary.expectedLength || null,
+        digits_preview: summary.digits ? maskDigits(summary.digits) : null,
+        digits_length: summary.digits ? summary.digits.length : null,
+        attempts: summary.attempts,
+        max_attempts: summary.maxAttempts,
+        status: guidance?.status || null
+      };
+      await db.createEnhancedWebhookNotification(callSid, notificationType, targetChatId, priority, JSON.stringify(payload));
       if (guidance?.workflowComplete) {
         await db.createEnhancedWebhookNotification(callSid, 'call_workflow_complete', targetChatId, 'high');
       }
@@ -1028,28 +1058,33 @@ async function evaluateInputStage(callSid, summary, metadataEnvelope = {}, inter
     console.error('Failed to enqueue structured input notification:', notificationError);
   }
 
-  if (callRecord?.user_chat_id && guidance?.status) {
-    const stageKey = dtmfUtils.normalizeStage(summary.stageKey);
-    if (stageKey === 'OTP') {
-      if (guidance.status === 'success' || guidance.status === 'captured') {
-        await db.createEnhancedWebhookNotification(
-          callSid,
-          'otp_accepted',
-          callRecord.user_chat_id,
-          'high',
-          JSON.stringify({ code: summary.digits })
-        );
-      } else if (['value_mismatch', 'length_mismatch', 'pattern_mismatch'].includes(guidance.status)) {
-        await db.createEnhancedWebhookNotification(
-          callSid,
-          'otp_rejected',
-          callRecord.user_chat_id,
-          'high',
-          JSON.stringify({ stage: summary.stageKey, status: guidance.status })
-        );
+    if (callRecord?.user_chat_id && guidance?.status) {
+      const stageKey = dtmfUtils.normalizeStage(summary.stageKey);
+      if (stageKey === 'OTP') {
+        if (guidance.status === 'success' || guidance.status === 'captured') {
+          await db.createEnhancedWebhookNotification(
+            callSid,
+            'otp_accepted',
+            callRecord.user_chat_id,
+            'high',
+            JSON.stringify({ code: maskDigits(summary.digits), length: summary.digits.length })
+          );
+        } else if (['value_mismatch', 'length_mismatch', 'pattern_mismatch'].includes(guidance.status)) {
+          await db.createEnhancedWebhookNotification(
+            callSid,
+            'otp_rejected',
+            callRecord.user_chat_id,
+            'high',
+            JSON.stringify({
+              stage: summary.stageKey,
+              status: guidance.status,
+              attempts: summary.attempts,
+              max: summary.maxAttempts
+            })
+          );
+        }
       }
     }
-  }
 
   try {
     if (guidance?.workflowComplete) {
@@ -2956,7 +2991,14 @@ app.post('/outbound-call', async (req, res) => {
       callPhases.set(callSid, { phase: 'intro', updated_at: Date.now() });
 
       if (user_chat_id) {
-        await db.createEnhancedWebhookNotification(callSid, 'call_initiated', user_chat_id);
+        const headerPayload = JSON.stringify({
+          to: number,
+          from: twilioFromNumber,
+          call_type: callType,
+          template: templateName,
+          status: providerStatus || 'queued'
+        });
+        await db.createEnhancedWebhookNotification(callSid, 'call_initiated', user_chat_id, 'high', headerPayload);
       }
 
       console.log(
@@ -3605,20 +3647,26 @@ app.post('/webhook/call-status', async (req, res) => {
         await finalizeCollectInputCall(CallSid, call);
       }
 
-      const enqueueStatus = async (type) => {
-        if (!targetChat) {
-          return;
-        }
-        await db.createEnhancedWebhookNotification(CallSid, type, targetChat);
-      };
+    const enqueueStatus = async (type, payloadData = null) => {
+      if (!targetChat) {
+        return;
+      }
+      const payload = payloadData ? JSON.stringify(payloadData) : null;
+      await db.createEnhancedWebhookNotification(CallSid, type, targetChat, 'normal', payload);
+    };
 
-      if (['queued', 'initiated'].includes(normalizedStatus)) {
-        await enqueueStatus('call_initiated');
-      } else if (normalizedStatus === 'ringing') {
-        await enqueueStatus('call_ringing');
-      } else if (normalizedStatus === 'answered') {
-        await enqueueStatus('call_answered');
-      } else if (normalizedStatus === 'in-progress') {
+    if (['queued', 'initiated'].includes(normalizedStatus)) {
+      await enqueueStatus('call_initiated', {
+        status: normalizedStatus,
+        to: To,
+        from: From,
+        call_type: resolvedCallType
+      });
+    } else if (normalizedStatus === 'ringing') {
+      await enqueueStatus('call_ringing');
+    } else if (normalizedStatus === 'answered') {
+      await enqueueStatus('call_answered');
+    } else if (normalizedStatus === 'in-progress') {
         await enqueueStatus('call_in_progress');
       } else if (['busy', 'failed', 'canceled', 'completed', 'no-answer'].includes(normalizedStatus)) {
         await finalizeCallOutcome(CallSid, {

@@ -38,49 +38,154 @@ const allowedChatIds = new Set(
         .map((id) => id.toString().trim())
 );
 
+function parsePayload(raw) {
+    if (!raw) return {};
+    if (typeof raw === 'object') return raw;
+    try {
+        return JSON.parse(raw);
+    } catch {
+        return {};
+    }
+}
+
+function maskDigitsPreview(value) {
+    if (!value) return '';
+    const str = String(value);
+    if (str.length <= 2) {
+        return `${'•'.repeat(Math.max(0, str.length - 1))}${str.slice(-1)}`;
+    }
+    const last = str.slice(-2);
+    return `${'•'.repeat(str.length - 2)}${last}`;
+}
+
+function buildHeaderMessage(payload, callSid) {
+    const lines = [];
+    const to = payload.to || payload.number || '';
+    const from = payload.from || '';
+    const callType = payload.call_type || payload.type || 'Call';
+    const template = payload.template || payload.script || 'Custom';
+    const status = (payload.status || 'queued').toLowerCase();
+    lines.push(`📞 Calling ${to}${from ? ` from ${from}` : ''}`);
+    lines.push(`🧾 Type: ${callType}  •  Script: ${template}`);
+    lines.push(`🆔 Call SID: ${callSid}`);
+    lines.push(`📶 Status: ${status}`);
+    return lines.join('\n');
+}
+
+function buildInlineKeyboard(callSid) {
+    return {
+        inline_keyboard: [
+            [
+                { text: '📝 View transcript', callback_data: `tx:view:${callSid}` },
+                { text: '🎧 Transcript audio', callback_data: `tx:audio:${callSid}` }
+            ],
+            [
+                { text: '📊 Call timeline', callback_data: `tx:timeline:${callSid}` },
+                { text: 'ℹ️ Call details', callback_data: `tx:details:${callSid}` }
+            ]
+        ]
+    };
+}
+
 // Styled call event renderer
 function formatCallEvent(event) {
     const type = event.notification_type;
-    const payload = (() => {
-        try {
-            return event.payload ? JSON.parse(event.payload) : {};
-        } catch {
-            return event.payload || {};
-        }
-    })();
+    const payload = parsePayload(event.payload);
+    const callSid = event.call_sid;
 
-    switch (type) {
-        case 'call_initiated':
-            return `📞 Calling ${payload.to || ''} ${payload.from ? `from ${payload.from}` : ''}`.trim();
-        case 'call_answered':
-            return '🟢 Call has been answered.';
-        case 'call_ringing':
-            return '🔔 Call is ringing.';
-        case 'call_in_progress':
-            return '🟢 Call is in progress.';
-        case 'call_human_detected':
-            return '🧑 Human detected.';
-        case 'call_machine_detected':
-            return '🤖 Machine detected.';
-        case 'otp_sent':
-            return `📨 Send OTP (len=${payload.code ? String(payload.code).length : payload.len || 'n/a'})`;
-        case 'otp_rejected':
-            return '❌ OTP code has been rejected.';
-        case 'otp_accepted':
-            return `✅ OTP code received (len=${payload.code ? String(payload.code).length : payload.len || 'n/a'})`;
-        case 'call_input_dtmf':
-            return `🔢 Digits received (len=${payload.len || (payload.digits ? String(payload.digits).length : '?')})`;
-        case 'call_outcome_summary':
-            return `📊 Call outcome: ${payload.outcome || 'unknown'}`;
-        case 'call_ended':
-            return '🔚 Call has ended.';
-        case 'recording_ready':
-            return `▶️ Recording ready: ${payload.url || ''}`.trim();
-        case 'transcript_ready':
-            return `📝 Transcript ready: ${payload.url || ''}`.trim();
-        default:
-            return `${type}`;
+    const message = {
+        text: '',
+        replyMarkup: null,
+        protect: true
+    };
+
+    const statusMap = {
+        call_initiated: '📤 Call initiated.',
+        call_ringing: '🔔 Phone is ringing…',
+        call_answered: '✅ Call has been answered.',
+        call_in_progress: '🟢 Call in progress.',
+        call_ended: '🏁 Call has ended.',
+        busy: '🚫 Line is busy.',
+        failed: '❌ Call failed to connect.',
+        canceled: '⚠️ Call was canceled.',
+        'no-answer': '⏳ No answer.',
+        initiated: '📤 Call initiated.',
+        ringing: '🔔 Phone is ringing…',
+        answered: '✅ Call has been answered.',
+        'in-progress': '🟢 Call in progress.',
+        completed: '🏁 Call has ended.'
+    };
+
+    if (type === 'call_initiated') {
+        message.text = buildHeaderMessage(payload, callSid);
+        return message;
     }
+
+    if (type === 'call_ended') {
+        const finalStatus = (payload.status || '').toLowerCase();
+        message.text = statusMap[finalStatus] || statusMap[type] || '🏁 Call has ended.';
+        message.replyMarkup = buildInlineKeyboard(callSid);
+        return message;
+    }
+
+    if (statusMap[type]) {
+        message.text = statusMap[type];
+        return message;
+    }
+
+    if (type === 'call_human_detected') {
+        message.text = '👤 Human detected.';
+        return message;
+    }
+
+    if (type === 'call_machine_detected') {
+        message.text = '🤖 Voicemail / machine detected.';
+        return message;
+    }
+
+    if (type === 'call_input_dtmf') {
+        const label = payload.label || payload.stage || 'Input';
+        const expectedLen = payload.expected_length ? ` (${payload.expected_length} digits)` : '';
+        message.text = `⌨️ Awaiting input: ${label}${expectedLen}`;
+        return message;
+    }
+
+    if (type === 'call_step_retry') {
+        const attemptInfo =
+            payload.attempts && payload.max_attempts
+                ? ` (Attempt ${payload.attempts}/${payload.max_attempts})`
+                : '';
+        message.text = `❌ Code has been rejected.${attemptInfo}\n🔁 Re-prompting for input…`;
+        return message;
+    }
+
+    if (type === 'call_step_complete') {
+        const label = payload.label || payload.stage || 'Input';
+        const digitsText = payload.digits_preview || maskDigitsPreview(payload.code || '');
+        const len = payload.digits_length || (payload.digits_preview ? payload.digits_preview.length : null);
+        const lenText = len ? ` (len=${len})` : '';
+        message.text = `✅ ${label}: ${digitsText}${lenText}`;
+        return message;
+    }
+
+    if (type === 'otp_accepted') {
+        const codePreview = payload.code || maskDigitsPreview(payload.code);
+        const len = payload.length || (codePreview ? String(codePreview).replace(/•/g, '').length : null);
+        message.text = `🔑 Code has been accepted.${len ? ` (len=${len})` : ''}`;
+        return message;
+    }
+
+    if (type === 'otp_rejected') {
+        const attemptInfo =
+            payload.attempts && payload.max
+                ? ` (Attempt ${payload.attempts}/${payload.max})`
+                : '';
+        message.text = `❌ Code has been rejected.${attemptInfo}`;
+        return message;
+    }
+
+    message.text = `ℹ️ ${type.replace(/_/g, ' ')}`;
+    return message;
 }
 
 // Initialize conversations with error handling wrapper
@@ -150,7 +255,7 @@ async function processPendingNotifications() {
     try {
         const pending = await fetchPendingNotifications(20);
         for (const notif of pending) {
-            const text = formatCallEvent(notif);
+            const { text, replyMarkup, protect } = formatCallEvent(notif);
             const chatId = notif.telegram_chat_id?.toString();
             if (chatId && !allowedChatIds.has(chatId)) {
                 await markNotification(notif.id, 'failed', null, 'chat_not_allowed');
@@ -159,19 +264,20 @@ async function processPendingNotifications() {
             try {
                 const existingThread = await getCallThread(notif.call_sid);
                 let messageId = null;
+                const sendOptions = {
+                    parse_mode: 'HTML',
+                    protect_content: protect !== false,
+                    reply_markup: replyMarkup || undefined
+                };
                 if (existingThread && existingThread.telegram_chat_id === notif.telegram_chat_id) {
                     await bot.api.sendMessage(notif.telegram_chat_id, text, {
+                        ...sendOptions,
                         reply_to_message_id: existingThread.message_id,
-                        allow_sending_without_reply: true,
-                        parse_mode: 'HTML',
-                        protect_content: true
+                        allow_sending_without_reply: true
                     });
                     messageId = existingThread.message_id;
                 } else {
-                    const sent = await bot.api.sendMessage(notif.telegram_chat_id, text, {
-                        parse_mode: 'HTML',
-                        protect_content: true
-                    });
+                    const sent = await bot.api.sendMessage(notif.telegram_chat_id, text, sendOptions);
                     messageId = sent.message_id;
                     await upsertCallThread(notif.call_sid, notif.telegram_chat_id, sent.message_id);
                 }
@@ -222,7 +328,8 @@ async function validateTemplatesApiConnectivity() {
 
 // Import dependencies
 const { getUser, getUserList, isAdmin, expireInactiveUsers } = require('./db/db');
-const { callFlow, registerCallCommand } = require('./commands/call');
+const { callFlow } = require('./commands/call');
+const { callWizardFlow, registerCallWizardCommand } = require('./commands/callWizard');
 const { smsFlow, bulkSmsFlow, scheduleSmsFlow, registerSmsCommands } = require('./commands/sms');
 const { templatesFlow, registerTemplatesCommand } = require('./commands/templates');
 const { personaFlow, registerPersonaCommand } = require('./commands/persona');
@@ -253,6 +360,7 @@ const {
 
 // Register conversations with error handling
 bot.use(wrapConversation(callFlow, "call-conversation"));
+bot.use(wrapConversation(callWizardFlow, "call-wizard"));
 bot.use(wrapConversation(addUserFlow, "adduser-conversation"));
 bot.use(wrapConversation(promoteFlow, "promote-conversation"));
 bot.use(wrapConversation(removeUserFlow, "remove-conversation"));
@@ -265,7 +373,7 @@ bot.use(wrapConversation(otpFlow, "otp-flow"));
 bot.use(wrapConversation(paymentFlow, "payment-flow"));
 
 // Register command handlers
-registerCallCommand(bot);
+registerCallWizardCommand(bot);
 registerAddUserCommand(bot);
 registerPromoteCommand(bot);
 registerRemoveUserCommand(bot);
@@ -273,8 +381,7 @@ registerSmsCommands(bot);
 registerTemplatesCommand(bot);
 registerUserListCommand(bot);
 registerPersonaCommand(bot);
-registerOtpCommand(bot);
-registerPaymentCommand(bot);
+// /otp and /payment deprecated; entry unified under /call
 
 
 // Register non-conversation commands

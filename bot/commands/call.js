@@ -20,6 +20,7 @@ const {
   safeReset,
   guardAgainstCommandInterrupt
 } = require('../utils/sessionState');
+const { setWizardCallSid, clearWizardState } = require('../db/db');
 
 const templatesApiBase = config.templatesApiUrl.replace(/\/+$/, '');
 
@@ -666,6 +667,11 @@ async function callFlow(conversation, ctx) {
 
       await ctx.reply(successMsg, { parse_mode: 'Markdown' });
       flow.touch('completed');
+      if (ctx.session?.wizardCategory) {
+        await setWizardCallSid(ctx.from.id, ctx.chat.id, data.call_sid);
+        await clearWizardState(ctx.from.id, ctx.chat.id);
+        delete ctx.session.wizardCategory;
+      }
     } else {
       await ctx.reply('⚠️ Call was sent but response format unexpected. Check logs.');
     }
