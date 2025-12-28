@@ -396,8 +396,7 @@ async function validateTemplatesApiConnectivity() {
 
 // Import dependencies
 const { getUser, getUserList, isAdmin, expireInactiveUsers } = require('./db/db');
-const { callFlow } = require('./commands/call');
-const { callWizardFlow, registerCallWizardCommand } = require('./commands/callWizard');
+const { callFlow, callWizardFlow, otpFlow, paymentFlow, registerCallCommand } = require('./commands/call');
 const { smsFlow, bulkSmsFlow, scheduleSmsFlow, registerSmsCommands } = require('./commands/sms');
 const { templatesFlow, registerTemplatesCommand } = require('./commands/templates');
 const { personaFlow, registerPersonaCommand } = require('./commands/persona');
@@ -428,6 +427,8 @@ const {
 // Register conversations with error handling
 bot.use(wrapConversation(callFlow, "call-conversation"));
 bot.use(wrapConversation(callWizardFlow, "call-wizard"));
+bot.use(wrapConversation(otpFlow, "otp-flow"));
+bot.use(wrapConversation(paymentFlow, "payment-flow"));
 bot.use(wrapConversation(addUserFlow, "adduser-conversation"));
 bot.use(wrapConversation(promoteFlow, "promote-conversation"));
 bot.use(wrapConversation(removeUserFlow, "remove-conversation"));
@@ -436,10 +437,9 @@ bot.use(wrapConversation(smsFlow, "sms-conversation"));
 bot.use(wrapConversation(bulkSmsFlow, "bulk-sms-conversation"));
 bot.use(wrapConversation(templatesFlow, "templates-conversation"));
 bot.use(wrapConversation(personaFlow, "persona-conversation"));
-// NOTE: /otp and /payment flows removed - unified under /call command
 
 // Register command handlers
-registerCallWizardCommand(bot);
+registerCallCommand(bot);
 registerAddUserCommand(bot);
 registerPromoteCommand(bot);
 registerRemoveUserCommand(bot);
@@ -447,7 +447,6 @@ registerSmsCommands(bot);
 registerTemplatesCommand(bot);
 registerUserListCommand(bot);
 registerPersonaCommand(bot);
-// /otp and /payment deprecated; entry unified under /call
 
 
 // Register non-conversation commands
