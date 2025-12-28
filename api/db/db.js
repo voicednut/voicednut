@@ -25,6 +25,18 @@ class EnhancedDatabase {
                 }
             });
         });
+
+        // Improve concurrency/reliability
+        await new Promise((resolve, reject) => {
+            this.db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;', (err) => {
+                if (err) {
+                    console.warn('⚠️ Failed to enable WAL/busy_timeout:', err.message);
+                    reject(err);
+                } else {
+                    resolve();
+                }
+            });
+        });
     }
 
     async execute(sql, context, options = {}) {
@@ -158,6 +170,21 @@ class EnhancedDatabase {
                 name: 'add_webhook_notifications_payload',
                 sql: 'ALTER TABLE webhook_notifications ADD COLUMN payload TEXT',
                 ignoreErrors: ['duplicate column']
+            },
+            {
+                name: 'add_call_inputs_digits_len',
+                sql: 'ALTER TABLE call_inputs ADD COLUMN digits_len INTEGER',
+                ignoreErrors: ['duplicate column']
+            },
+            {
+                name: 'add_call_inputs_retry_count',
+                sql: 'ALTER TABLE call_inputs ADD COLUMN retry_count INTEGER DEFAULT 0',
+                ignoreErrors: ['duplicate column']
+            },
+            {
+                name: 'add_call_inputs_updated_at',
+                sql: 'ALTER TABLE call_inputs ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                ignoreErrors: ['duplicate column']
             }
         ];
 
@@ -259,7 +286,18 @@ class EnhancedDatabase {
                 input_type TEXT NOT NULL CHECK(input_type IN ('speech','digit')),
                 value TEXT NOT NULL,
                 confidence REAL,
+                digits_len INTEGER,
+                retry_count INTEGER DEFAULT 0,
                 captured_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(call_sid) REFERENCES calls(call_sid)
+            )`,
+            `CREATE TABLE IF NOT EXISTS call_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_sid TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                payload_json TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(call_sid) REFERENCES calls(call_sid)
             )`,
 
@@ -426,6 +464,7 @@ class EnhancedDatabase {
             'CREATE INDEX IF NOT EXISTS idx_calls_created_at ON calls(created_at)',
             'CREATE INDEX IF NOT EXISTS idx_calls_twilio_status ON calls(twilio_status)',
             'CREATE INDEX IF NOT EXISTS idx_calls_phone_number ON calls(phone_number)',
+            'CREATE INDEX IF NOT EXISTS idx_calls_state ON calls(status, call_sid)',
             // Transcript indexes for both table names
             'CREATE INDEX IF NOT EXISTS idx_transcripts_call_sid ON call_transcripts(call_sid)',
             'CREATE INDEX IF NOT EXISTS idx_transcripts_timestamp ON call_transcripts(timestamp)',
@@ -444,6 +483,8 @@ class EnhancedDatabase {
             'CREATE INDEX IF NOT EXISTS idx_states_call_sid ON call_states(call_sid)',
             'CREATE INDEX IF NOT EXISTS idx_states_timestamp ON call_states(timestamp)',
             'CREATE INDEX IF NOT EXISTS idx_states_state ON call_states(state)',
+            'CREATE INDEX IF NOT EXISTS idx_call_events_call_sid ON call_events(call_sid)',
+            'CREATE INDEX IF NOT EXISTS idx_call_events_created_at ON call_events(call_sid, created_at)',
             
             // Notification indexes
             'CREATE INDEX IF NOT EXISTS idx_notifications_status ON webhook_notifications(status)',
@@ -454,6 +495,7 @@ class EnhancedDatabase {
             'CREATE INDEX IF NOT EXISTS idx_notifications_priority ON webhook_notifications(priority)',
             'CREATE INDEX IF NOT EXISTS idx_call_inputs_call_sid ON call_inputs(call_sid)',
             'CREATE INDEX IF NOT EXISTS idx_call_inputs_step ON call_inputs(call_sid, step)',
+            'CREATE INDEX IF NOT EXISTS idx_call_inputs_updated ON call_inputs(updated_at)',
             
             // Metrics indexes
             'CREATE INDEX IF NOT EXISTS idx_metrics_date ON notification_metrics(date)',
@@ -1218,16 +1260,19 @@ class EnhancedDatabase {
             step,
             input_type,
             value,
-            confidence = null
+            confidence = null,
+            digits_len = null,
+            retry_count = 0,
+            updated_at = new Date().toISOString()
         } = entry;
 
         return new Promise((resolve, reject) => {
             const stmt = this.db.prepare(`
-                INSERT INTO call_inputs (call_sid, step, input_type, value, confidence)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO call_inputs (call_sid, step, input_type, value, confidence, digits_len, retry_count, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             `);
 
-            stmt.run([call_sid, step, input_type, value, confidence], function(err) {
+            stmt.run([call_sid, step, input_type, value, confidence, digits_len, retry_count, updated_at], function(err) {
                 if (err) {
                     reject(err);
                 } else {
@@ -1428,6 +1473,24 @@ class EnhancedDatabase {
                     resolve(rows || []);
                 }
             });
+        });
+    }
+
+    async saveCallEvent(call_sid, event_type, payload = null) {
+        if (!call_sid || !event_type) return null;
+        return new Promise((resolve, reject) => {
+            const stmt = this.db.prepare(`
+                INSERT INTO call_events (call_sid, event_type, payload_json)
+                VALUES (?, ?, ?)
+            `);
+            stmt.run([call_sid, event_type, payload ? JSON.stringify(payload) : null], function(err) {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(this.lastID);
+                }
+            });
+            stmt.finalize();
         });
     }
 

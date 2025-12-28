@@ -65,6 +65,7 @@ const {
   authToken: twilioAuthToken,
   fromNumber: twilioFromNumber,
 } = twilioConfig;
+const twilioLib = require('twilio');
 const missingTwilioEnv = [];
 if (!twilioAccountSid) missingTwilioEnv.push('TWILIO_ACCOUNT_SID');
 if (!twilioAuthToken) missingTwilioEnv.push('TWILIO_AUTH_TOKEN');
@@ -75,6 +76,18 @@ const callConfigurations = new Map();
 const activeCalls = new Map();
 const callFunctionSystems = new Map(); // Store generated functions per call
 const inputOrchestrators = new Map();
+const callHangupTimers = new Map();
+const ORCHESTRATOR_STATES = {
+  INITIATED: 'INITIATED',
+  RINGING: 'RINGING',
+  ANSWERED: 'ANSWERED',
+  IN_PROGRESS: 'IN_PROGRESS',
+  COLLECTING_INPUT: 'COLLECTING_INPUT',
+  VALIDATING: 'VALIDATING',
+  SUCCESS: 'SUCCESS',
+  FAIL: 'FAIL',
+  COMPLETED: 'COMPLETED'
+};
 
 let db;
 const functionEngine = new DynamicFunctionEngine();
@@ -93,6 +106,7 @@ const awsCallSessions = new Map();
 const awsContactIndex = new Map();
 const vonageCallIndex = new Map();
 const callDtmfBuffers = new Map();
+const callDtmfStageBuffers = new Map();
 const callDtmfAttempts = new Map(); // tracks retries per call/stage
 const DTMF_FLUSH_DELAY_MS = 1500;
 const DTMF_MAX_ATTEMPTS_DEFAULT = 3;
@@ -294,6 +308,151 @@ function getStageConstraints(stageConfig = {}, callMetadata = {}) {
   };
 }
 
+function resolveExpectedOtp(callMetadata = {}) {
+  return (
+    callMetadata.expected_otp ||
+    callMetadata.otp_code ||
+    callMetadata.one_time_passcode ||
+    callMetadata.expected_passcode ||
+    callMetadata.passcode ||
+    null
+  );
+}
+
+function resolveStageConfigFromMetadata(callMetadata = {}, stageKey, stageLabel) {
+  const inputSequence = Array.isArray(callMetadata.input_sequence) ? callMetadata.input_sequence : [];
+  let resolvedKey = stageKey ? dtmfUtils.normalizeStage(stageKey) : null;
+  let resolvedLabel = stageLabel || null;
+  let stageConfig = null;
+
+  if (resolvedKey && inputSequence.length) {
+    stageConfig = inputSequence.find((entry) => {
+      const entryKey = dtmfUtils.normalizeStage(entry.stage || entry.label || entry.name || entry.key || '');
+      return entryKey === resolvedKey;
+    }) || null;
+  }
+
+  if (!stageConfig && inputSequence.length) {
+    const expectedOtp = resolveExpectedOtp(callMetadata);
+    if (!resolvedKey && expectedOtp) {
+      resolvedKey = 'OTP';
+    }
+    if (resolvedKey === 'OTP') {
+      stageConfig = inputSequence.find((entry) => {
+        const entryKey = dtmfUtils.normalizeStage(entry.stage || entry.label || entry.name || entry.key || '');
+        return entryKey === 'OTP';
+      }) || null;
+    }
+    if (!stageConfig) {
+      stageConfig = inputSequence[0];
+    }
+  }
+
+  if (stageConfig && !resolvedKey) {
+    resolvedKey = dtmfUtils.normalizeStage(stageConfig.stage || stageConfig.label || stageConfig.name || 'GENERIC');
+  }
+  if (stageConfig && !resolvedLabel && stageConfig.label) {
+    resolvedLabel = stageConfig.label;
+  }
+
+  const expectedOtp = resolveExpectedOtp(callMetadata);
+  if (!resolvedKey && expectedOtp) {
+    resolvedKey = 'OTP';
+  }
+
+  return {
+    stageKey: resolvedKey || 'GENERIC',
+    stageLabel: resolvedLabel || null,
+    stageConfig: stageConfig || null,
+  };
+}
+
+function getStageBuffer(callSid, stageKey) {
+  const normalized = dtmfUtils.normalizeStage(stageKey || 'GENERIC');
+  const map = callDtmfStageBuffers.get(callSid) || new Map();
+  const buffer = map.get(normalized) || { digits: '', updatedAt: Date.now() };
+  map.set(normalized, buffer);
+  callDtmfStageBuffers.set(callSid, map);
+  return buffer;
+}
+
+function clearStageBuffer(callSid, stageKey) {
+  const normalized = dtmfUtils.normalizeStage(stageKey || 'GENERIC');
+  const map = callDtmfStageBuffers.get(callSid);
+  if (!map) return;
+  map.delete(normalized);
+  if (!map.size) {
+    callDtmfStageBuffers.delete(callSid);
+  }
+}
+
+function appendDigits(existing, incoming) {
+  if (!incoming) return existing || '';
+  if (!existing) return incoming;
+  if (incoming === existing) return existing;
+  if (incoming.startsWith(existing)) {
+    return incoming;
+  }
+  if (existing.startsWith(incoming)) {
+    return existing;
+  }
+  if (incoming.length === 1) {
+    return existing + incoming;
+  }
+  return existing + incoming;
+}
+
+async function recordCallEvent(callSid, eventType, payload = {}) {
+  if (!callSid || !eventType || !db?.saveCallEvent) return;
+  const enriched = { ...payload, eventType, callSid, at: new Date().toISOString() };
+  try {
+    await db.saveCallEvent(callSid, eventType, enriched);
+  } catch (error) {
+    console.warn(`Failed to persist call event ${eventType} for ${callSid}:`, error.message);
+  }
+}
+
+async function transitionCallState(callSid, state, payload = {}) {
+  if (!callSid || !state) return;
+  const timestamp = new Date().toISOString();
+  const data = { ...payload, state, timestamp };
+  try {
+    await db.updateCallStatus(callSid, state, { status: state });
+  } catch (error) {
+    console.warn(`Failed to update call status for ${callSid} -> ${state}:`, error.message);
+  }
+  try {
+    await db.updateCallState(callSid, state, data);
+  } catch (error) {
+    console.warn(`Failed to append call_state for ${callSid} -> ${state}:`, error.message);
+  }
+  await recordCallEvent(callSid, state, data);
+}
+
+async function scheduleCallHangup(callSid, delayMs = 4500) {
+  if (!callSid || currentProvider !== 'twilio') {
+    return;
+  }
+  if (callHangupTimers.has(callSid)) {
+    return;
+  }
+  if (!twilioAccountSid || !twilioAuthToken) {
+    console.warn('Twilio credentials missing; cannot auto-hangup.');
+    return;
+  }
+  const timer = setTimeout(async () => {
+    callHangupTimers.delete(callSid);
+    try {
+      const client = require('twilio')(twilioAccountSid, twilioAuthToken);
+      await client.calls(callSid).update({ status: 'completed' });
+      console.log(`📴 Call ${callSid} marked completed after OTP verification.`.green);
+    } catch (error) {
+      console.warn(`Failed to hang up call ${callSid}:`, error.message);
+    }
+  }, delayMs);
+  callHangupTimers.set(callSid, timer);
+}
+
 function trackStageAttempt(callSid, stageKey) {
   const normalized = dtmfUtils.normalizeStage(stageKey || 'GENERIC');
   const map = callDtmfAttempts.get(callSid) || new Map();
@@ -389,11 +548,6 @@ async function persistDtmfCapture(callSid, digits, options = {}) {
     return;
   }
 
-  const sanitizedDigits = sanitizeDigits(digits);
-  if (!sanitizedDigits) {
-    return;
-  }
-
   const {
     source = currentProvider,
     provider = currentProvider,
@@ -405,7 +559,13 @@ async function persistDtmfCapture(callSid, digits, options = {}) {
     capture_method: captureMethod = 'stream',
     skipCallInputInsert = false,
     callInputStep: providedCallInputStep = null,
+    raw_input: rawInputOverride = null,
   } = options;
+
+  let sanitizedDigits = sanitizeDigits(digits);
+  if (!sanitizedDigits && !rawInputOverride) {
+    return;
+  }
 
   try {
     const callRecord = await db.getCall(callSid);
@@ -421,14 +581,8 @@ async function persistDtmfCapture(callSid, digits, options = {}) {
     const retentionDays = callMetadata?.retention_days || complianceConfig?.retentionDays;
 
     let callInputStep = typeof providedCallInputStep === 'number' ? providedCallInputStep : null;
-    if (callRecord.call_type === 'collect_input' && !skipCallInputInsert) {
+    if (!callInputStep) {
       callInputStep = await db.getNextCallInputStep(callSid);
-      await db.saveCallInput({
-        call_sid: callSid,
-        step: callInputStep,
-        input_type: 'digit',
-        value: sanitizedDigits,
-      });
     }
 
     const metadataEnvelope =
@@ -440,86 +594,231 @@ async function persistDtmfCapture(callSid, digits, options = {}) {
       metadataEnvelope.call_input_step = callInputStep;
     }
 
-    let stageKey = stageKeyOverride ? dtmfUtils.normalizeStage(stageKeyOverride) : null;
-    let stageLabel = stageLabelOverride || null;
+    if (!skipCallInputInsert && sanitizedDigits) {
+      try {
+        await db.saveCallInput({
+          call_sid: callSid,
+          step: callInputStep,
+          input_type: 'digit',
+          value: sanitizedDigits,
+          digits_len: sanitizedDigits.length,
+          retry_count: 0,
+          updated_at: new Date().toISOString()
+        });
+      } catch (inputErr) {
+        console.warn('Failed to record call input row:', inputErr.message);
+      }
+    }
 
-    if (!stageKey && metadataEnvelope.stage_key) {
-      stageKey = dtmfUtils.normalizeStage(metadataEnvelope.stage_key);
+    const rawInput = rawInputOverride ?? null;
+    const stageContext = resolveStageConfigFromMetadata(
+      callMetadata,
+      stageKeyOverride || metadataEnvelope.stage_key || null,
+      stageLabelOverride || metadataEnvelope.stage_label || null
+    );
+    let stageKey = stageContext.stageKey;
+    let stageLabel = stageContext.stageLabel;
+    const stageConfig = stageContext.stageConfig || {};
+
+    const expectedOtp = resolveExpectedOtp(callMetadata);
+    if (expectedOtp && stageKey === 'OTP' && !stageConfig.expectedValue) {
+      stageConfig.expectedValue = expectedOtp;
+    }
+
+    const constraints = getStageConstraints(stageConfig, callMetadata);
+    const expectedLength = constraints.expectedLength || (expectedOtp ? String(expectedOtp).length : null);
+    let allowedRegex = null;
+    try {
+      allowedRegex = constraints.allowedPattern instanceof RegExp
+        ? constraints.allowedPattern
+        : new RegExp(constraints.allowedPattern);
+    } catch (patternError) {
+      console.warn(`Invalid DTMF pattern for stage ${stageKey}:`, patternError.message);
     }
 
     if (callRecord.call_type === 'collect_input') {
       const stepIndex = callInputStep && inputSequence.length ? callInputStep - 1 : 0;
-      const stageConfig =
+      const activeStage =
         (typeof stepIndex === 'number' && inputSequence[stepIndex]) || inputSequence[inputSequence.length - 1];
-      const constraints = getStageConstraints(stageConfig, callMetadata);
+      const stageConstraints = getStageConstraints(activeStage || stageConfig, callMetadata);
+      const lengthMismatch = stageConstraints.expectedLength && sanitizedDigits.length !== stageConstraints.expectedLength;
+      const patternMismatch = allowedRegex ? !allowedRegex.test(sanitizedDigits) : false;
 
-      if (stageConfig) {
-        if (!stageKey && stageConfig.stage) {
-          stageKey = dtmfUtils.normalizeStage(stageConfig.stage);
-        } else if (!stageKey && stageConfig.label) {
-          stageKey = dtmfUtils.normalizeStage(stageConfig.label);
-        }
-        if (!stageLabel && stageConfig.label) {
-          stageLabel = stageConfig.label;
-        }
+      if (lengthMismatch || patternMismatch) {
+        const attempts = trackStageAttempt(callSid, stageKey);
+        const invalidReason = lengthMismatch ? 'length_mismatch' : 'pattern_mismatch';
+        const maxAttempts = stageConstraints.maxAttempts;
 
-        let allowedRegex = null;
-        try {
-          allowedRegex = constraints.allowedPattern instanceof RegExp
-            ? constraints.allowedPattern
-            : new RegExp(constraints.allowedPattern);
-        } catch (patternError) {
-          console.warn(`Invalid DTMF pattern for stage ${stageKey}:`, patternError.message);
-        }
+        await db.updateCallState(callSid, 'dtmf_invalid', {
+          stage_key: stageKey,
+          digits_preview: sanitizedDigits,
+          reason: invalidReason,
+          attempts,
+          max_attempts: maxAttempts,
+          expected_length: stageConstraints.expectedLength || null,
+        });
+        callPhases.set(callSid, { phase: 'ask_otp_retry', updated_at: Date.now(), stage: stageKey, attempts });
 
-        const lengthMismatch = constraints.expectedLength && sanitizedDigits.length !== constraints.expectedLength;
-        const patternMismatch = allowedRegex ? !allowedRegex.test(sanitizedDigits) : false;
+        await db.logServiceHealth('dtmf_invalid', 'error', {
+          call_sid: callSid,
+          stage_key: stageKey,
+          reason: invalidReason,
+          attempts,
+          max_attempts: maxAttempts,
+        });
 
-        if (lengthMismatch || patternMismatch) {
-          const attempts = trackStageAttempt(callSid, stageKey);
-          const invalidReason = lengthMismatch ? 'length_mismatch' : 'pattern_mismatch';
-          const maxAttempts = constraints.maxAttempts;
+        console.warn(
+          `⚠️ Rejected DTMF for ${callSid} stage ${stageKey}: ${invalidReason} (${sanitizedDigits.length} digits, expected ${stageConstraints.expectedLength || 'any'})`
+        );
 
-          await db.updateCallState(callSid, 'dtmf_invalid', {
-            stage_key: stageKey,
-            digits_preview: sanitizedDigits,
-            reason: invalidReason,
-            attempts,
-            max_attempts: maxAttempts,
-            expected_length: constraints.expectedLength || null,
-          });
-          callPhases.set(callSid, { phase: 'ask_otp_retry', updated_at: Date.now(), stage: stageKey, attempts });
-
-          await db.logServiceHealth('dtmf_invalid', 'error', {
-            call_sid: callSid,
-            stage_key: stageKey,
-            reason: invalidReason,
-            attempts,
-            max_attempts: maxAttempts,
-          });
-
-          console.warn(
-            `⚠️ Rejected DTMF for ${callSid} stage ${stageKey}: ${invalidReason} (${sanitizedDigits.length} digits, expected ${constraints.expectedLength || 'any'})`
-          );
-
-          if (attempts >= maxAttempts && callRecord) {
-            callPhases.set(callSid, { phase: 'sms_fallback', updated_at: Date.now(), stage: stageKey, attempts });
-            await sendOtpFallbackSms(callRecord, callMetadata, stageKey, attempts, maxAttempts);
-          }
-
-          return {
-            status: 'invalid',
-            stageKey,
-            stageLabel: stageLabel || stageKey,
-            digits: sanitizedDigits,
-            reason: invalidReason,
-            attempts,
-            maxAttempts,
-            callRecord,
-          };
+        if (attempts >= maxAttempts && callRecord) {
+          callPhases.set(callSid, { phase: 'sms_fallback', updated_at: Date.now(), stage: stageKey, attempts });
+          await sendOtpFallbackSms(callRecord, callMetadata, stageKey, attempts, maxAttempts);
         }
 
-        resetStageAttempts(callSid, stageKey);
+        return {
+          status: 'invalid',
+          stageKey,
+          stageLabel: stageLabel || stageKey,
+          digits: sanitizedDigits,
+          expectedLength: stageConstraints.expectedLength || null,
+          reason: invalidReason,
+          attempts,
+          maxAttempts,
+          callRecord,
+        };
+      }
+
+      resetStageAttempts(callSid, stageKey);
+    } else {
+      if (!sanitizedDigits && rawInput) {
+        const attempts = trackStageAttempt(callSid, stageKey);
+        const maxAttempts = constraints.maxAttempts;
+        await db.updateCallState(callSid, 'dtmf_invalid', {
+          stage_key: stageKey,
+          digits_preview: '',
+          reason: 'non_digit',
+          attempts,
+          max_attempts: maxAttempts,
+          expected_length: expectedLength || null,
+        });
+        callPhases.set(callSid, { phase: 'ask_otp_retry', updated_at: Date.now(), stage: stageKey, attempts });
+        return {
+          status: 'invalid',
+          stageKey,
+          stageLabel: stageLabel || stageKey,
+          digits: '',
+          expectedLength: expectedLength || null,
+          reason: 'non_digit',
+          attempts,
+          maxAttempts,
+          callRecord,
+        };
+      }
+
+      const buffer = getStageBuffer(callSid, stageKey);
+      const combinedDigits = appendDigits(buffer.digits, sanitizedDigits);
+
+      if (expectedLength && combinedDigits.length < expectedLength) {
+        buffer.digits = combinedDigits;
+        buffer.updatedAt = Date.now();
+        await db.updateCallState(callSid, 'dtmf_partial', {
+          stage_key: stageKey,
+          digits_preview: combinedDigits,
+          expected_length: expectedLength,
+          remaining: expectedLength - combinedDigits.length,
+        });
+        return {
+          status: 'incomplete',
+          stageKey,
+          stageLabel: stageLabel || stageKey,
+          digits: combinedDigits,
+          expectedLength,
+          remaining: expectedLength - combinedDigits.length,
+          callRecord,
+        };
+      }
+
+      if (expectedLength && combinedDigits.length > expectedLength) {
+        clearStageBuffer(callSid, stageKey);
+        const attempts = trackStageAttempt(callSid, stageKey);
+        const maxAttempts = constraints.maxAttempts;
+        await db.updateCallState(callSid, 'dtmf_invalid', {
+          stage_key: stageKey,
+          digits_preview: combinedDigits,
+          reason: 'length_mismatch',
+          attempts,
+          max_attempts: maxAttempts,
+          expected_length: expectedLength,
+        });
+        return {
+          status: 'invalid',
+          stageKey,
+          stageLabel: stageLabel || stageKey,
+          digits: combinedDigits,
+          expectedLength,
+          reason: 'length_mismatch',
+          attempts,
+          maxAttempts,
+          callRecord,
+        };
+      }
+
+      if (allowedRegex && combinedDigits && !allowedRegex.test(combinedDigits)) {
+        clearStageBuffer(callSid, stageKey);
+        const attempts = trackStageAttempt(callSid, stageKey);
+        const maxAttempts = constraints.maxAttempts;
+        await db.updateCallState(callSid, 'dtmf_invalid', {
+          stage_key: stageKey,
+          digits_preview: combinedDigits,
+          reason: 'pattern_mismatch',
+          attempts,
+          max_attempts: maxAttempts,
+          expected_length: expectedLength || null,
+        });
+        return {
+          status: 'invalid',
+          stageKey,
+          stageLabel: stageLabel || stageKey,
+          digits: combinedDigits,
+          expectedLength: expectedLength || null,
+          reason: 'pattern_mismatch',
+          attempts,
+          maxAttempts,
+          callRecord,
+        };
+      }
+
+      if (expectedOtp && stageKey === 'OTP' && expectedLength && combinedDigits.length === expectedLength && combinedDigits !== String(expectedOtp)) {
+        clearStageBuffer(callSid, stageKey);
+        const attempts = trackStageAttempt(callSid, stageKey);
+        const maxAttempts = constraints.maxAttempts;
+        await db.updateCallState(callSid, 'dtmf_invalid', {
+          stage_key: stageKey,
+          digits_preview: combinedDigits,
+          reason: 'value_mismatch',
+          attempts,
+          max_attempts: maxAttempts,
+          expected_length: expectedLength || null,
+        });
+        return {
+          status: 'invalid',
+          stageKey,
+          stageLabel: stageLabel || stageKey,
+          digits: combinedDigits,
+          expectedLength: expectedLength || null,
+          reason: 'value_mismatch',
+          attempts,
+          maxAttempts,
+          callRecord,
+        };
+      }
+
+      if (expectedLength && combinedDigits.length === expectedLength) {
+        clearStageBuffer(callSid, stageKey);
+        sanitizedDigits = combinedDigits;
+      } else if (combinedDigits) {
+        sanitizedDigits = combinedDigits;
       }
     }
 
@@ -582,16 +881,6 @@ async function persistDtmfCapture(callSid, digits, options = {}) {
       await db.createEnhancedWebhookNotification(callSid, 'call_input_dtmf', targetChatId, 'high');
     }
 
-    if (callRecord?.user_chat_id && compliancePayload.metadata.stage_key === 'OTP') {
-      await db.createEnhancedWebhookNotification(
-        callSid,
-        'otp_accepted',
-        callRecord.user_chat_id,
-        'high',
-        JSON.stringify({ code: sanitizedDigits })
-      );
-    }
-
     await db.logServiceHealth('call_system', 'dtmf_captured', {
       call_sid: callSid,
       digits_length: sanitizedDigits.length,
@@ -612,6 +901,7 @@ async function persistDtmfCapture(callSid, digits, options = {}) {
       stageKey: compliancePayload.metadata.stage_key,
       stageLabel: resolvedStageLabel,
       digits: sanitizedDigits,
+      expectedLength: expectedLength || null,
       callRecord,
     };
   } catch (error) {
@@ -630,6 +920,26 @@ async function evaluateInputStage(callSid, summary, metadataEnvelope = {}, inter
   const transcriptLine = `[Keypad] ${stageDisplay}: ${summary.digits}`;
     const callRecord = summary.callRecord || (await db.getCall(callSid));
 
+    if (summary.status === 'incomplete') {
+      const remaining = summary.remaining || (summary.expectedLength ? summary.expectedLength - summary.digits.length : null);
+      const remainingText = remaining ? `${remaining} more digit${remaining === 1 ? '' : 's'}` : 'the remaining digits';
+      await transitionCallState(callSid, ORCHESTRATOR_STATES.COLLECTING_INPUT, {
+        stage: summary.stageKey,
+        digits: summary.digits,
+        expected_length: summary.expectedLength || null
+      });
+      return {
+        stageDisplay,
+        guidance: {
+          needsRetry: true,
+          attempts: summary.attempts,
+          maxAttempts: summary.maxAttempts,
+          agentPrompt: `Please enter ${remainingText} to complete the ${stageDisplay}.`,
+        },
+        callRecord,
+      };
+    }
+
     if (summary.status === 'invalid') {
       try {
         await db.updateCallState(callSid, 'dtmf_invalid', {
@@ -642,6 +952,12 @@ async function evaluateInputStage(callSid, summary, metadataEnvelope = {}, inter
     } catch (stateError) {
       console.warn('Failed to record invalid DTMF state:', stateError.message);
     }
+    await transitionCallState(callSid, ORCHESTRATOR_STATES.VALIDATING, {
+      stage: summary.stageKey,
+      digits: summary.digits,
+      status: 'invalid',
+      reason: summary.reason || 'invalid'
+    });
 
     if (callRecord?.user_chat_id) {
       await db.createEnhancedWebhookNotification(
@@ -710,6 +1026,50 @@ async function evaluateInputStage(callSid, summary, metadataEnvelope = {}, inter
     }
   } catch (notificationError) {
     console.error('Failed to enqueue structured input notification:', notificationError);
+  }
+
+  if (callRecord?.user_chat_id && guidance?.status) {
+    const stageKey = dtmfUtils.normalizeStage(summary.stageKey);
+    if (stageKey === 'OTP') {
+      if (guidance.status === 'success' || guidance.status === 'captured') {
+        await db.createEnhancedWebhookNotification(
+          callSid,
+          'otp_accepted',
+          callRecord.user_chat_id,
+          'high',
+          JSON.stringify({ code: summary.digits })
+        );
+      } else if (['value_mismatch', 'length_mismatch', 'pattern_mismatch'].includes(guidance.status)) {
+        await db.createEnhancedWebhookNotification(
+          callSid,
+          'otp_rejected',
+          callRecord.user_chat_id,
+          'high',
+          JSON.stringify({ stage: summary.stageKey, status: guidance.status })
+        );
+      }
+    }
+  }
+
+  try {
+    if (guidance?.workflowComplete) {
+      await transitionCallState(callSid, ORCHESTRATOR_STATES.SUCCESS, {
+        stage: summary.stageKey,
+        digits: summary.digits
+      });
+    } else if (guidance?.needsRetry) {
+      await transitionCallState(callSid, ORCHESTRATOR_STATES.COLLECTING_INPUT, {
+        stage: summary.stageKey,
+        digits: summary.digits
+      });
+    } else {
+      await transitionCallState(callSid, ORCHESTRATOR_STATES.VALIDATING, {
+        stage: summary.stageKey,
+        digits: summary.digits
+      });
+    }
+  } catch (transitionError) {
+    console.warn('Failed to persist orchestrator state for DTMF:', transitionError.message);
   }
 
   return { guidance, stageDisplay, callRecord };
@@ -831,7 +1191,10 @@ async function handleCollectInputRequest(req, res, callRecord) {
       step: pendingStep,
       input_type: inputType,
       value: normalizedValue,
-      confidence: digits ? null : confidence
+      confidence: digits ? null : confidence,
+      digits_len: normalizedValue.length,
+      retry_count: 0,
+      updated_at: new Date().toISOString()
     });
 
     await db.markCallHasInput(callSid, normalizedValue);
@@ -1487,8 +1850,50 @@ app.ws('/connection', (ws) => {
     let interactionCount = 0;
     let isInitialized = false;
 
-    const emitRealtimeDtmfInsights = async (summary, metadataEnvelope = {}) => {
-      if (!summary || !summary.digits || !gptService) {
+    const emitDeterministicReply = async (message) => {
+      if (!message) {
+        return;
+      }
+      try {
+        await db.addTranscript({
+          call_sid: callSid,
+          speaker: 'ai',
+          message,
+          interaction_count: interactionCount,
+          personality_used: 'deterministic'
+        });
+        await db.updateCallState(callSid, 'ai_responded', {
+          message,
+          interaction_count: interactionCount,
+          personality: 'deterministic'
+        });
+      } catch (dbError) {
+        console.error('Database error logging deterministic response:', dbError);
+      }
+
+      await ttsService.generate({
+        partialResponseIndex: null,
+        partialResponse: message
+      }, interactionCount);
+      interactionCount += 1;
+    };
+
+    const safeGptCompletion = async (message, role = 'user', name = 'dtmf_input') => {
+      if (!gptService?.enabled) {
+        return false;
+      }
+      try {
+        await gptService.completion(message, interactionCount, role, name);
+        interactionCount += 1;
+        return true;
+      } catch (error) {
+        console.error('GPT completion failed, using deterministic fallback:', error.message || error);
+        return false;
+      }
+    };
+
+  const emitRealtimeDtmfInsights = async (summary, metadataEnvelope = {}) => {
+      if (!summary || !summary.digits) {
         return;
       }
 
@@ -1519,8 +1924,23 @@ app.ws('/connection', (ws) => {
         }
       }
 
-      gptService.completion(promptSegments.join(' '), interactionCount, 'user', 'dtmf_input');
-      interactionCount += 1;
+      const deterministicMessage = guidance?.agentPrompt || `Please enter the requested digits for ${stageDisplay}.`;
+      const usedGpt = await safeGptCompletion(promptSegments.join(' '), 'user', 'dtmf_input');
+      if (!usedGpt) {
+        await emitDeterministicReply(deterministicMessage);
+      }
+
+      const normalizedStage = dtmfUtils.normalizeStage(summary.stageKey);
+      const shouldHangup =
+        guidance?.workflowComplete ||
+        (normalizedStage === 'OTP' && ['success', 'captured'].includes(guidance?.status));
+      if (shouldHangup) {
+        await scheduleCallHangup(callSid);
+        await transitionCallState(callSid, ORCHESTRATOR_STATES.SUCCESS, {
+          stage: normalizedStage,
+          call_type: callConfig?.call_type || 'service'
+        });
+      }
     };
 
     const recordDtmfInput = async (digits, source = 'twilio', extraMeta = {}) => {
@@ -1560,6 +1980,7 @@ app.ws('/connection', (ws) => {
         stage_key: stageCandidate,
         stage_label: extraMeta.stage_label,
         metadata: metadataEnvelope,
+        raw_input: extraMeta.raw_input,
         finished: extraMeta.finished === true,
         reason: extraMeta.reason,
         capture_method: 'twilio_stream',
@@ -1596,6 +2017,10 @@ app.ws('/connection', (ws) => {
             await db.updateCallState(callSid, 'stream_started', {
               stream_sid: streamSid,
               start_time: callStartTime.toISOString()
+            });
+            await transitionCallState(callSid, ORCHESTRATOR_STATES.IN_PROGRESS, {
+              stream_sid: streamSid,
+              call_type: call?.call_type || 'service'
             });
             
             // Create webhook notification for stream start (internal tracking)
@@ -1796,6 +2221,7 @@ app.ws('/connection', (ws) => {
 
               await recordDtmfInput(digitsToPersist, source, {
                 dtmf: dtmfInfo,
+                raw_input: buffer.lastRaw,
                 reason,
                 finished: reason === 'terminator'
               });
@@ -1828,10 +2254,20 @@ app.ws('/connection', (ws) => {
             clearTimeout(pendingDigits.timer);
           }
           if (pendingDigits?.digits) {
-            await recordDtmfInput(pendingDigits.digits, 'twilio', { finished: false, reason: 'stream_stopped' });
+            await recordDtmfInput(pendingDigits.digits, 'twilio', {
+              finished: false,
+              reason: 'stream_stopped',
+              raw_input: pendingDigits.lastRaw
+            });
           }
           callDtmfBuffers.delete(callSid);
           callDtmfAttempts.delete(callSid);
+          callDtmfStageBuffers.delete(callSid);
+          const hangupTimer = callHangupTimers.get(callSid);
+          if (hangupTimer) {
+            clearTimeout(hangupTimer);
+            callHangupTimers.delete(callSid);
+          }
 
           await handleCallEnd(callSid, callStartTime);
           
@@ -1915,12 +2351,22 @@ app.ws('/connection', (ws) => {
         clearTimeout(pendingDigits.timer);
       }
       if (pendingDigits?.digits) {
-        recordDtmfInput(pendingDigits.digits, 'twilio', { finished: false, reason: 'socket_closed' })
+        recordDtmfInput(pendingDigits.digits, 'twilio', {
+          finished: false,
+          reason: 'socket_closed',
+          raw_input: pendingDigits.lastRaw
+        })
           .catch((error) => console.error('❌ Failed to persist buffered DTMF digits on close:', error));
       }
       if (callSid) {
         callDtmfBuffers.delete(callSid);
         callDtmfAttempts.delete(callSid);
+        callDtmfStageBuffers.delete(callSid);
+        const hangupTimer = callHangupTimers.get(callSid);
+        if (hangupTimer) {
+          clearTimeout(hangupTimer);
+          callHangupTimers.delete(callSid);
+        }
       }
 
       const session = callSid ? activeCalls.get(callSid) : undefined;
@@ -1993,6 +2439,10 @@ async function handleCallEnd(callSid, callStartTime) {
       duration: duration,
       total_interactions: transcripts.length,
       personality_adaptations: adaptationAnalysis.personalityChanges || 0
+    });
+    await transitionCallState(callSid, ORCHESTRATOR_STATES.COMPLETED, {
+      duration,
+      call_type: callDetails?.call_type || 'service'
     });
 
     if (callDetails?.provider !== 'twilio') {
@@ -2319,7 +2769,7 @@ app.post('/outbound-call', async (req, res) => {
     const retentionDays = resolveRetentionDays(metadataPayload.retention_days);
     metadataPayload.compliance_policy = compliancePolicy;
     metadataPayload.retention_days = retentionDays;
-    const metadataSerialized = Object.keys(metadataPayload).length ? JSON.stringify(metadataPayload) : null;
+    let metadataSerialized = Object.keys(metadataPayload).length ? JSON.stringify(metadataPayload) : null;
     const resolvedTelegramChatId = requestedTelegramChatId || user_chat_id || null;
 
     const callConfig = {
@@ -2350,6 +2800,8 @@ app.post('/outbound-call', async (req, res) => {
     };
 
     ensureStructuredInputSequence(callConfig, metadataPayload);
+    metadataSerialized = Object.keys(metadataPayload).length ? JSON.stringify(metadataPayload) : null;
+    callConfig.metadata_json = metadataSerialized;
 
     let callSid = null;
     let providerContactId = null;
@@ -2424,7 +2876,7 @@ app.post('/outbound-call', async (req, res) => {
         to: number,
         from: twilioFromNumber,
         statusCallback: `${publicHttpBase}/webhook/call-status`,
-        statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed', 'busy', 'no-answer', 'canceled', 'failed'],
+        statusCallbackEvent: ['initiated', 'ringing', 'answered', 'in-progress', 'completed', 'busy', 'no-answer', 'canceled', 'failed'],
         statusCallbackMethod: 'POST',
         machineDetection: 'Enable',
         machineDetectionTimeout: 8,
@@ -2481,6 +2933,11 @@ app.post('/outbound-call', async (req, res) => {
         business_function: businessFunction,
         telegram_chat_id: resolvedTelegramChatId,
         metadata_json: metadataSerialized
+      });
+      await transitionCallState(callSid, ORCHESTRATOR_STATES.INITIATED, {
+        call_type: callType,
+        to: number,
+        provider: currentProvider
       });
       const expectedOtp =
         metadataPayload?.expected_otp ||
@@ -2733,6 +3190,61 @@ app.post('/vonage/event', async (req, res) => {
       await db.createEnhancedWebhookNotification(callSid, notificationType, callRecord.user_chat_id);
     }
 
+    if (normalizedStatus) {
+      await db.updateCallStatus(callSid, normalizedStatus);
+      const stateMap = {
+        started: ORCHESTRATOR_STATES.INITIATED,
+        initiated: ORCHESTRATOR_STATES.INITIATED,
+        ringing: ORCHESTRATOR_STATES.RINGING,
+        answered: ORCHESTRATOR_STATES.ANSWERED,
+        'in-progress': ORCHESTRATOR_STATES.IN_PROGRESS,
+        completed: ORCHESTRATOR_STATES.COMPLETED,
+        hangup: ORCHESTRATOR_STATES.COMPLETED,
+        finished: ORCHESTRATOR_STATES.COMPLETED,
+        failed: ORCHESTRATOR_STATES.FAIL,
+        busy: ORCHESTRATOR_STATES.FAIL,
+        cancelled: ORCHESTRATOR_STATES.FAIL,
+        canceled: ORCHESTRATOR_STATES.FAIL,
+        timeout: ORCHESTRATOR_STATES.FAIL,
+        unanswered: ORCHESTRATOR_STATES.FAIL,
+        no_answer: ORCHESTRATOR_STATES.FAIL,
+      };
+      const mapped = stateMap[normalizedStatusRaw] || normalizedStatus.toUpperCase();
+      await transitionCallState(callSid, mapped, {
+        provider_status: normalizedStatusRaw,
+        provider: 'vonage',
+        uuid,
+        conversation_uuid: conversationUuid
+      });
+    }
+
+    if (normalizedStatus) {
+      const stateMap = {
+        started: ORCHESTRATOR_STATES.INITIATED,
+        initiated: ORCHESTRATOR_STATES.INITIATED,
+        ringing: ORCHESTRATOR_STATES.RINGING,
+        answered: ORCHESTRATOR_STATES.ANSWERED,
+        'in-progress': ORCHESTRATOR_STATES.IN_PROGRESS,
+        completed: ORCHESTRATOR_STATES.COMPLETED,
+        hangup: ORCHESTRATOR_STATES.COMPLETED,
+        finished: ORCHESTRATOR_STATES.COMPLETED,
+        failed: ORCHESTRATOR_STATES.FAIL,
+        busy: ORCHESTRATOR_STATES.FAIL,
+        cancelled: ORCHESTRATOR_STATES.FAIL,
+        canceled: ORCHESTRATOR_STATES.FAIL,
+        timeout: ORCHESTRATOR_STATES.FAIL,
+        unanswered: ORCHESTRATOR_STATES.FAIL,
+        no_answer: ORCHESTRATOR_STATES.FAIL,
+      };
+      const mapped = stateMap[normalizedStatusRaw] || normalizedStatus.toUpperCase();
+      await transitionCallState(callSid, mapped, {
+        provider_status: normalizedStatusRaw,
+        provider: 'vonage',
+        uuid,
+        conversation_uuid: conversationUuid
+      });
+    }
+
     if (['completed', 'no-answer', 'failed', 'busy'].includes(normalizedStatus)) {
       vonageCallIndex.delete(uuid);
       if (event.conversation_uuid) {
@@ -2773,6 +3285,15 @@ app.post('/webhook/amd-status', async (req, res) => {
     return;
   }
 
+  const signature = req.headers['x-twilio-signature'];
+  const url = `${publicHttpBase}${req.originalUrl}`;
+  const valid = twilioLib.validateRequest(twilioAuthToken, signature, url, req.body || {});
+  if (!valid) {
+    console.warn('⚠️ Invalid Twilio signature for amd-status webhook');
+    res.status(403).send('Invalid signature');
+    return;
+  }
+
   try {
     const { CallSid, AnsweredBy, AnsweredByStatus, Confidence } = req.body || {};
     if (!CallSid) {
@@ -2799,6 +3320,22 @@ app.post('/webhook/amd-status', async (req, res) => {
       answeredBy: answeredValue,
       markAnswered: Boolean(normalizedAnswer),
     });
+
+    await recordCallEvent(CallSid, 'AMD_UPDATE', {
+      answered_by: answeredValue,
+      normalized: normalizedAnswer,
+      confidence: Number.isFinite(confidenceValue) ? confidenceValue : undefined,
+      at: new Date().toISOString()
+    });
+    await recordCallEvent(CallSid, 'AMD', {
+      answered_by: answeredValue,
+      confidence: Number.isFinite(confidenceValue) ? confidenceValue : undefined,
+      call_type: call.call_type || 'service',
+      at: new Date().toISOString()
+    });
+    if (isHumanAnsweredBy(normalizedAnswer)) {
+      await transitionCallState(CallSid, ORCHESTRATOR_STATES.ANSWERED, { answered_by: answeredValue });
+    }
 
     await callHintStateMachine.handleAmdUpdate(CallSid, answeredValue, {
       call,
@@ -2839,6 +3376,14 @@ app.post('/webhook/call-status', async (req, res) => {
     res.status(404).json({ error: 'Twilio call status webhook disabled for current provider' });
     return;
   }
+  const signature = req.headers['x-twilio-signature'];
+  const url = `${publicHttpBase}${req.originalUrl}`;
+  const valid = twilioLib.validateRequest(twilioAuthToken, signature, url, req.body || {});
+  if (!valid) {
+    console.warn('⚠️ Invalid Twilio signature for call-status webhook');
+    res.status(403).send('Invalid signature');
+    return;
+  }
   try {
     const { 
       CallSid, 
@@ -2853,8 +3398,9 @@ app.post('/webhook/call-status', async (req, res) => {
       DialCallDuration // This is key for detecting actual answer vs no-answer
     } = req.body;
     
-    console.log(`📱 Fixed Webhook: Call ${CallSid} status: ${CallStatus}`.blue);
-    console.log(`📊 Debug Info:`.cyan);
+    const nowIso = new Date().toISOString();
+    console.log(`📱 Webhook: ${CallSid} status: ${CallStatus} @ ${nowIso}`.blue);
+    console.log(`📊 Debug Info (${call?.call_type || 'unknown'}):`.cyan);
     console.log(`   Duration: ${Duration || 'N/A'}`);
     console.log(`   CallDuration: ${CallDuration || 'N/A'}`);
     console.log(`   DialCallDuration: ${DialCallDuration || 'N/A'}`);
@@ -2914,7 +3460,53 @@ app.post('/webhook/call-status', async (req, res) => {
       updateData.ring_duration = Math.round((now - callStart) / 1000);
     }
 
+    const latestSameState = await db.getLatestCallState(CallSid, mappedState);
+    if (latestSameState) {
+      res.status(200).send('OK');
+      return;
+    }
+
     await db.updateCallStatus(CallSid, normalizedStatus, updateData);
+    const stateMap = {
+      queued: ORCHESTRATOR_STATES.INITIATED,
+      initiated: ORCHESTRATOR_STATES.INITIATED,
+      ringing: ORCHESTRATOR_STATES.RINGING,
+      answered: ORCHESTRATOR_STATES.ANSWERED,
+      'in-progress': ORCHESTRATOR_STATES.IN_PROGRESS,
+      completed: ORCHESTRATOR_STATES.COMPLETED,
+      'no-answer': ORCHESTRATOR_STATES.FAIL,
+      failed: ORCHESTRATOR_STATES.FAIL,
+      busy: ORCHESTRATOR_STATES.FAIL,
+      canceled: ORCHESTRATOR_STATES.FAIL
+    };
+    const mappedState = stateMap[normalizedStatus] || normalizedStatus.toUpperCase();
+    await transitionCallState(CallSid, mappedState, {
+      provider_status: CallStatus,
+      answered_by: AnsweredBy,
+      duration: durationValue,
+      call_type: call.call_type,
+      received_at: nowIso
+    });
+    const orchestratorState =
+      normalizedStatus === 'ringing'
+        ? ORCHESTRATOR_STATES.RINGING
+        : normalizedStatus === 'answered'
+          ? ORCHESTRATOR_STATES.ANSWERED
+          : normalizedStatus === 'in-progress'
+            ? ORCHESTRATOR_STATES.IN_PROGRESS
+            : ['completed'].includes(normalizedStatus)
+              ? ORCHESTRATOR_STATES.COMPLETED
+              : ['busy', 'failed', 'canceled', 'no-answer'].includes(normalizedStatus)
+                ? ORCHESTRATOR_STATES.FAIL
+                : ORCHESTRATOR_STATES.INITIATED;
+    await transitionCallState(CallSid, orchestratorState, {
+      provider_status: CallStatus,
+      call_type: call.call_type || 'service',
+      to: To,
+      from: From,
+      answered_by: AnsweredBy || null,
+      duration: durationValue
+    });
 
     await callHintStateMachine.handleTwilioStatus(CallSid, normalizedStatus, {
       call,
@@ -2938,8 +3530,10 @@ app.post('/webhook/call-status', async (req, res) => {
       await enqueueStatus('call_initiated');
     } else if (normalizedStatus === 'ringing') {
       await enqueueStatus('call_ringing');
-    } else if (['in-progress', 'answered'].includes(normalizedStatus)) {
+    } else if (normalizedStatus === 'answered') {
       await enqueueStatus('call_answered');
+    } else if (normalizedStatus === 'in-progress') {
+      await enqueueStatus('call_in_progress');
     } else if (['busy', 'failed', 'canceled', 'completed', 'no-answer'].includes(normalizedStatus)) {
       await finalizeCallOutcome(CallSid, {
         finalStatus: normalizedStatus,

@@ -29,6 +29,14 @@ const {
 // Bot initialization
 const token = config.botToken;
 const bot = new Bot(token);
+const allowedChatIds = new Set(
+    [
+        config.admin.userId,
+        ...(process.env.ALLOWED_TELEGRAM_IDS ? process.env.ALLOWED_TELEGRAM_IDS.split(',') : [])
+    ]
+        .filter(Boolean)
+        .map((id) => id.toString().trim())
+);
 
 // Styled call event renderer
 function formatCallEvent(event) {
@@ -48,16 +56,20 @@ function formatCallEvent(event) {
             return '🟢 Call has been answered.';
         case 'call_ringing':
             return '🔔 Call is ringing.';
+        case 'call_in_progress':
+            return '🟢 Call is in progress.';
         case 'call_human_detected':
             return '🧑 Human detected.';
         case 'call_machine_detected':
             return '🤖 Machine detected.';
         case 'otp_sent':
-            return `📨 Send OTP${payload.code ? `: ${payload.code}` : ''}`;
+            return `📨 Send OTP (len=${payload.code ? String(payload.code).length : payload.len || 'n/a'})`;
         case 'otp_rejected':
             return '❌ OTP code has been rejected.';
         case 'otp_accepted':
-            return '✅ OTP code has been accepted.';
+            return `✅ OTP code received (len=${payload.code ? String(payload.code).length : payload.len || 'n/a'})`;
+        case 'call_input_dtmf':
+            return `🔢 Digits received (len=${payload.len || (payload.digits ? String(payload.digits).length : '?')})`;
         case 'call_outcome_summary':
             return `📊 Call outcome: ${payload.outcome || 'unknown'}`;
         case 'call_ended':
@@ -139,6 +151,11 @@ async function processPendingNotifications() {
         const pending = await fetchPendingNotifications(20);
         for (const notif of pending) {
             const text = formatCallEvent(notif);
+            const chatId = notif.telegram_chat_id?.toString();
+            if (chatId && !allowedChatIds.has(chatId)) {
+                await markNotification(notif.id, 'failed', null, 'chat_not_allowed');
+                continue;
+            }
             try {
                 const existingThread = await getCallThread(notif.call_sid);
                 let messageId = null;
@@ -146,10 +163,15 @@ async function processPendingNotifications() {
                     await bot.api.sendMessage(notif.telegram_chat_id, text, {
                         reply_to_message_id: existingThread.message_id,
                         allow_sending_without_reply: true,
+                        parse_mode: 'HTML',
+                        protect_content: true
                     });
                     messageId = existingThread.message_id;
                 } else {
-                    const sent = await bot.api.sendMessage(notif.telegram_chat_id, text);
+                    const sent = await bot.api.sendMessage(notif.telegram_chat_id, text, {
+                        parse_mode: 'HTML',
+                        protect_content: true
+                    });
                     messageId = sent.message_id;
                     await upsertCallThread(notif.call_sid, notif.telegram_chat_id, sent.message_id);
                 }

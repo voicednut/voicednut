@@ -12,17 +12,29 @@ class EnhancedGptService extends EventEmitter {
   constructor(customPrompt = null, customFirstMessage = null) {
     super();
     
-    // Initialize OpenRouter client
-    this.openai = new OpenAI({
-      baseURL: "https://openrouter.ai/api/v1",
-      apiKey: process.env.OPENROUTER_API_KEY,
-      defaultHeaders: {
-        "HTTP-Referer": process.env.YOUR_SITE_URL || "http://localhost:3000",
-        "X-Title": process.env.YOUR_SITE_NAME || "Adaptive Voice AI",
-      }
-    });
-    
-    this.model = process.env.OPENROUTER_MODEL || "meta-llama/llama-3.1-8b-instruct:free";
+    const openAiKey = process.env.OPENAI_API_KEY;
+    const openRouterKey = process.env.OPENROUTER_API_KEY;
+    this.enabled = Boolean(openRouterKey || openAiKey);
+
+    if (openRouterKey) {
+      this.openai = new OpenAI({
+        baseURL: "https://openrouter.ai/api/v1",
+        apiKey: openRouterKey,
+        defaultHeaders: {
+          "HTTP-Referer": process.env.YOUR_SITE_URL || "http://localhost:3000",
+          "X-Title": process.env.YOUR_SITE_NAME || "Adaptive Voice AI",
+        }
+      });
+      this.model = process.env.OPENROUTER_MODEL || "meta-llama/llama-3.1-8b-instruct:free";
+    } else if (openAiKey) {
+      this.openai = new OpenAI({
+        apiKey: openAiKey
+      });
+      this.model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    } else {
+      this.openai = null;
+      this.model = null;
+    }
     
     // Initialize Personality Engine
     this.personalityEngine = new PersonalityEngine();
@@ -54,6 +66,9 @@ class EnhancedGptService extends EventEmitter {
     this.lastPersonalityUpdate = null;
 
     console.log('🎭 Enhanced GPT Service initialized with adaptive capabilities'.green);
+    if (!this.enabled) {
+      console.warn('⚠️ No GPT API key configured. GPT responses will be skipped.'.yellow);
+    }
     if (this.isCustomConfiguration) {
       console.log(`Custom prompt preview: ${this.baseSystemPrompt.substring(0, 100)}...`.cyan);
     }
@@ -116,6 +131,9 @@ class EnhancedGptService extends EventEmitter {
 
   // Enhanced completion method with dynamic functions and personality adaptation
   async completion(text, interactionCount, role = 'user', name = 'user') {
+    if (!this.enabled || !this.openai) {
+      return null;
+    }
     // Store conversation for personality analysis
     this.conversationHistory.push({
       role: role,
@@ -164,60 +182,61 @@ class EnhancedGptService extends EventEmitter {
     // Use dynamic tools if available, otherwise use default empty array
     const toolsToUse = this.dynamicTools.length > 0 ? this.dynamicTools : [];
 
-    // Send completion request with current personality-adapted context and dynamic tools
-    const stream = await this.openai.chat.completions.create({
-      model: this.model,
-      messages: this.userContext,
-      tools: toolsToUse,
-      stream: true,
-    });
+    try {
+      // Send completion request with current personality-adapted context and dynamic tools
+      const stream = await this.openai.chat.completions.create({
+        model: this.model,
+        messages: this.userContext,
+        tools: toolsToUse,
+        stream: true,
+      });
 
-    let completeResponse = '';
-    let partialResponse = '';
-    let functionName = '';
-    let functionArgs = '';
-    let finishReason = '';
+      let completeResponse = '';
+      let partialResponse = '';
+      let functionName = '';
+      let functionArgs = '';
+      let finishReason = '';
 
-    function collectToolInformation(deltas) {
-      let name = deltas.tool_calls[0]?.function?.name || '';
-      if (name != '') {
-        functionName = name;
-      }
-      let args = deltas.tool_calls[0]?.function?.arguments || '';
-      if (args != '') {
-        functionArgs += args;
-      }
-    }
-
-    for await (const chunk of stream) {
-      let content = chunk.choices[0]?.delta?.content || '';
-      let deltas = chunk.choices[0].delta;
-      finishReason = chunk.choices[0].finish_reason;
-
-      if (deltas.tool_calls) {
-        collectToolInformation(deltas);
+      function collectToolInformation(deltas) {
+        let name = deltas.tool_calls[0]?.function?.name || '';
+        if (name != '') {
+          functionName = name;
+        }
+        let args = deltas.tool_calls[0]?.function?.arguments || '';
+        if (args != '') {
+          functionArgs += args;
+        }
       }
 
-      if (finishReason === 'tool_calls') {
-        // Use dynamic function if available
-        const functionToCall = this.availableFunctions[functionName];
-        
-        if (!functionToCall) {
-          console.error(`❌ Function ${functionName} not found in dynamic implementations`.red);
-          // Continue without function call
-          completeResponse += `I apologize, but I cannot execute the ${functionName} function at this time.`;
-          continue;
+      for await (const chunk of stream) {
+        let content = chunk.choices[0]?.delta?.content || '';
+        let deltas = chunk.choices[0].delta;
+        finishReason = chunk.choices[0].finish_reason;
+
+        if (deltas.tool_calls) {
+          collectToolInformation(deltas);
         }
 
-        const validatedArgs = this.validateFunctionArgs(functionArgs);
-        
-        // Find the corresponding tool data for the "say" message
-        const toolData = this.dynamicTools.find(tool => tool.function.name === functionName);
-        const say = toolData?.function?.say || 'One moment please...';
+        if (finishReason === 'tool_calls') {
+          // Use dynamic function if available
+          const functionToCall = this.availableFunctions[functionName];
+          
+          if (!functionToCall) {
+            console.error(`❌ Function ${functionName} not found in dynamic implementations`.red);
+            // Continue without function call
+            completeResponse += `I apologize, but I cannot execute the ${functionName} function at this time.`;
+            continue;
+          }
 
-        // Emit the function call response with personality context
-        this.emit('gptreply', {
-          partialResponseIndex: null,
+          const validatedArgs = this.validateFunctionArgs(functionArgs);
+          
+          // Find the corresponding tool data for the "say" message
+          const toolData = this.dynamicTools.find(tool => tool.function.name === functionName);
+          const say = toolData?.function?.say || 'One moment please...';
+
+          // Emit the function call response with personality context
+          this.emit('gptreply', {
+            partialResponseIndex: null,
           partialResponse: say,
           personalityInfo: this.personalityEngine.getCurrentPersonality()
         }, interactionCount);
@@ -253,6 +272,10 @@ class EnhancedGptService extends EventEmitter {
           partialResponse = '';
         }
       }
+      }
+    } catch (error) {
+      console.error('❌ GPT completion failed:', error.message || error);
+      return null;
     }
 
     // Store AI response in conversation history
