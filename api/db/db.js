@@ -2710,6 +2710,218 @@ class EnhancedDatabase {
            });
        });
    }
+
+   /**
+    * NEW METHODS FOR INPUT COLLECTION (Part A) AND WEBHOOK TRACKING (Part B)
+    */
+
+   // Record a single input attempt (DTMF digit collection)
+   async recordInputAttempt(call_sid, step_id, input_data) {
+       return new Promise((resolve, reject) => {
+           const sql = `
+               INSERT INTO call_inputs 
+               (call_sid, step_id, step_label, prompt_text, digits_masked, digits_length, attempt, is_valid, validation_error)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           `;
+           const params = [
+               call_sid,
+               input_data.step_id || step_id,
+               input_data.step_label || null,
+               input_data.prompt_text || null,
+               input_data.digits_masked || null,
+               input_data.digits_length || 0,
+               input_data.attempt || 1,
+               input_data.is_valid ? 1 : 0,
+               input_data.validation_error || null
+           ];
+           
+           this.db.run(sql, params, function(err) {
+               if (err) {
+                   reject(err);
+               } else {
+                   resolve({ id: this.lastID });
+               }
+           });
+       });
+   }
+
+   // Mark input step as confirmed (input collection completed for step)
+   async confirmInputStep(call_sid, step_id, final_digits_masked) {
+       return new Promise((resolve, reject) => {
+           const sql = `
+               UPDATE call_inputs 
+               SET confirmed = 1, final_digits_masked = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE call_sid = ? AND step_id = ?
+               ORDER BY created_at DESC
+               LIMIT 1
+           `;
+           
+           this.db.run(sql, [final_digits_masked, call_sid, step_id], (err) => {
+               if (err) {
+                   reject(err);
+               } else {
+                   resolve({ updated: true });
+               }
+           });
+       });
+   }
+
+   // Get all input attempts for a call
+   async getCallInputs(call_sid) {
+       return new Promise((resolve, reject) => {
+           const sql = `
+               SELECT * FROM call_inputs 
+               WHERE call_sid = ?
+               ORDER BY created_at ASC
+           `;
+           
+           this.db.all(sql, [call_sid], (err, rows) => {
+               if (err) {
+                   reject(err);
+               } else {
+                   resolve(rows || []);
+               }
+           });
+       });
+   }
+
+   // Get input state for a specific step
+   async getInputStepState(call_sid, step_id) {
+       return new Promise((resolve, reject) => {
+           const sql = `
+               SELECT * FROM call_inputs 
+               WHERE call_sid = ? AND step_id = ?
+               ORDER BY created_at DESC
+               LIMIT 1
+           `;
+           
+           this.db.get(sql, [call_sid, step_id], (err, row) => {
+               if (err) {
+                   reject(err);
+               } else {
+                   resolve(row || null);
+               }
+           });
+       });
+   }
+
+   // Record webhook/call event (append-only for idempotency)
+   async recordCallEvent(call_sid, status, event_data = {}) {
+       return new Promise((resolve, reject) => {
+           const sql = `
+               INSERT INTO call_events 
+               (call_sid, status, twilio_status, answered_by, payload_json)
+               VALUES (?, ?, ?, ?, ?)
+           `;
+           const params = [
+               call_sid,
+               status,
+               event_data.twilioStatus || null,
+               event_data.answeredBy || null,
+               event_data.payloadJson || JSON.stringify(event_data)
+           ];
+           
+           this.db.run(sql, params, function(err) {
+               if (err) {
+                   reject(err);
+               } else {
+                   resolve({ id: this.lastID });
+               }
+           });
+       });
+   }
+
+   // Get all call events in chronological order
+   async getCallEvents(call_sid) {
+       return new Promise((resolve, reject) => {
+           const sql = `
+               SELECT * FROM call_events 
+               WHERE call_sid = ?
+               ORDER BY created_at ASC
+           `;
+           
+           this.db.all(sql, [call_sid], (err, rows) => {
+               if (err) {
+                   reject(err);
+               } else {
+                   resolve(rows || []);
+               }
+           });
+       });
+   }
+
+   // Check if webhook was already processed (idempotency)
+   async checkWebhookDuplicate(signature) {
+       return new Promise((resolve, reject) => {
+           const sql = `SELECT id FROM webhook_dedupe WHERE signature = ? LIMIT 1`;
+           
+           this.db.get(sql, [signature], (err, row) => {
+               if (err) {
+                   reject(err);
+               } else {
+                   resolve(!!row);
+               }
+           });
+       });
+   }
+
+   // Mark webhook as processed
+   async markWebhookProcessed(signature, call_sid, status) {
+       return new Promise((resolve, reject) => {
+           const sql = `
+               INSERT OR IGNORE INTO webhook_dedupe (signature, call_sid, status)
+               VALUES (?, ?, ?)
+           `;
+           
+           this.db.run(sql, [signature, call_sid, status], function(err) {
+               if (err) {
+                   reject(err);
+               } else {
+                   resolve({ processed: true });
+               }
+           });
+       });
+   }
+
+   // Update call with Telegram info and final outcome
+   async updateCall(call_sid, updates = {}) {
+       return new Promise((resolve, reject) => {
+           // Build dynamic UPDATE statement
+           const fields = [];
+           const params = [];
+           
+           const allowedFields = [
+               'status', 'twilio_status', 'answered_by', 'duration', 'ended_at',
+               'telegram_chat_id', 'telegram_header_message_id', 'telegram_final_outcome_sent',
+               'final_outcome', 'state'
+           ];
+           
+           for (const [key, value] of Object.entries(updates)) {
+               if (allowedFields.includes(key)) {
+                   fields.push(`${key} = ?`);
+                   params.push(value);
+               }
+           }
+           
+           if (fields.length === 0) {
+               resolve({ updated: false });
+               return;
+           }
+           
+           fields.push('updated_at = CURRENT_TIMESTAMP');
+           params.push(call_sid); // For WHERE clause
+           
+           const sql = `UPDATE calls SET ${fields.join(', ')} WHERE call_sid = ?`;
+           
+           this.db.run(sql, params, function(err) {
+               if (err) {
+                   reject(err);
+               } else {
+                   resolve({ updated: this.changes > 0 });
+               }
+           });
+       });
+   }
 }
 
 module.exports = EnhancedDatabase;

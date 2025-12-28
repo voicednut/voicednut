@@ -594,6 +594,7 @@ async function callFlow(conversation, ctx) {
     const payload = {
       number,
       user_chat_id: ctx.from.id.toString(),
+      telegram_chat_id: ctx.chat.id.toString(),
       customer_name: customerName || null,
       ...configuration.payloadUpdates
     };
@@ -603,6 +604,14 @@ async function callFlow(conversation, ctx) {
     payload.voice_model = payload.voice_model || config.defaultVoiceModel;
     payload.template = payload.template || 'custom';
     payload.technical_level = payload.technical_level || 'auto';
+    
+    // Unified pipeline capability flags
+    // Determine if this call requires input collection based on call type or purpose
+    const inputCallPurposes = ['collect_input', 'order_lookup', 'payment', 'verification', 'otp'];
+    const requiresInput = inputCallPurposes.includes(payload.purpose || '');
+    payload.requires_input = requiresInput ? 1 : 0;
+    payload.has_transcript = 1; // Always enable transcript for audit trail
+    payload.has_recording = 1;  // Always enable recording
 
     const templateName =
       configuration.meta?.templateName ||
@@ -702,27 +711,55 @@ async function callFlow(conversation, ctx) {
         const invalidId = unknownBusinessMatch[1];
         await ctx.reply(`❌ Unrecognized service “${invalidId}”. Choose a valid business profile.`);
         handled = true;
+      } else if (apiError.includes('Invalid phone number format')) {
+        await ctx.reply('❌ Invalid phone number format. Please use E.164 format (e.g., +1234567890).');
+        handled = true;
+      } else if (apiError.includes('Missing required field')) {
+        const fieldMatch = apiError.match(/Missing required field:\s*(\w+)/i);
+        const field = fieldMatch ? fieldMatch[1] : 'required field';
+        await ctx.reply(`❌ Missing information: ${field}. Please provide this before placing a call.`);
+        handled = true;
       } else if (status === 400) {
-        await ctx.reply('❌ Invalid request. Check the provided details and try again.');
+        // Bad request - validation error
+        const msg = apiError || 'Check the provided details and try again.';
+        await ctx.reply(`❌ Invalid request: ${msg}`);
         handled = true;
       } else if (status === 401) {
-        await ctx.reply('❌ Authentication failed. Please verify your API credentials.');
+        // Authentication failure
+        await ctx.reply('❌ Authentication failed. Your API credentials may be invalid or expired. Contact your administrator.');
+        handled = true;
+      } else if (status === 404) {
+        // Not found
+        const resource = apiError.includes('business') ? 'service' : 'resource';
+        await ctx.reply(`❌ ${resource} not found. It may have been deleted or the ID is incorrect.`);
+        handled = true;
+      } else if (status === 429) {
+        // Rate limited
+        await ctx.reply('⚠️ Too many requests. Please wait a moment before trying another call.');
+        handled = true;
+      } else if (status === 500) {
+        // Server error
+        await ctx.reply('❌ Server error occurred. Please try again or contact support if problem persists.');
         handled = true;
       } else if (status === 503) {
-        await ctx.reply('⚠️ Service unavailable. Please try again shortly.');
+        // Service unavailable
+        await ctx.reply('⚠️ Service temporarily unavailable. The system may be under maintenance. Please try again shortly.');
         handled = true;
       }
 
       if (!handled) {
         const errorData = error.response.data;
-        await ctx.reply(`❌ Call failed with status ${status}: ${errorData?.error || error.response.statusText}`);
+        const errorMsg = errorData?.error || error.response.statusText || 'Unknown error';
+        await ctx.reply(`❌ Call failed (Error ${status}): ${errorMsg}`);
         handled = true;
       }
     } else if (error.request) {
-      await ctx.reply('🔄 Temporary network issue. Retrying shortly.');
+      // Network error - request was made but no response
+      await ctx.reply('🔄 Network error: Could not reach the server. Checking connection...');
       handled = true;
     } else {
-      await ctx.reply(`❌ Unexpected error: ${error.message}`);
+      // Unexpected error
+      await ctx.reply(`❌ Unexpected error: ${error.message}. Please try again.`);
       handled = true;
     }
 

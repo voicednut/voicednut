@@ -205,6 +205,8 @@ async function otpFlow(conversation, ctx) {
 
   const payload = {
     number,
+    user_chat_id: ctx.from.id.toString(),
+    telegram_chat_id: ctx.chat.id.toString(),
     call_type: 'collect_input',
     purpose: 'otp_verification',
     business_function: 'otp_verification',
@@ -219,6 +221,9 @@ async function otpFlow(conversation, ctx) {
     input_sequence: [
       { stage: 'OTP', label: 'Verification code', numDigits: Number(codeLength), pattern: `^\\d{${codeLength}}$` },
     ],
+    requires_input: 1,
+    has_transcript: 1,
+    has_recording: 1,
   };
 
   await ctx.reply(
@@ -266,12 +271,35 @@ async function otpFlow(conversation, ctx) {
       await ctx.reply('⚠️ OTP call cancelled.');
       return;
     }
-    const detail =
-      error.response?.data?.error ||
-      error.response?.statusText ||
-      error.message ||
-      'Unknown error';
-    await ctx.reply(`❌ Failed to place OTP call: ${detail}`);
+    
+    if (error.response) {
+      const status = error.response.status;
+      const apiError = (error.response.data?.error || '').toString();
+      
+      if (apiError.includes('Invalid phone number format')) {
+        await ctx.reply('❌ Invalid phone number format. Please use E.164 format (e.g., +1234567890).');
+      } else if (apiError.includes('Missing required field')) {
+        await ctx.reply('❌ Missing required information for OTP call. Please provide all details.');
+      } else if (status === 400) {
+        await ctx.reply(`❌ Invalid request: ${apiError || 'Check the provided details and try again.'}`);
+      } else if (status === 401) {
+        await ctx.reply('❌ Authentication failed. Your API credentials may be invalid.');
+      } else if (status === 404) {
+        await ctx.reply('❌ Resource not found. The service may no longer exist.');
+      } else if (status === 429) {
+        await ctx.reply('⚠️ Too many requests. Please wait a moment before trying again.');
+      } else if (status === 500) {
+        await ctx.reply('❌ Server error occurred. Please try again or contact support.');
+      } else if (status === 503) {
+        await ctx.reply('⚠️ Service temporarily unavailable. Please try again shortly.');
+      } else {
+        await ctx.reply(`❌ Failed to place OTP call (Error ${status}): ${apiError || 'Unknown error'}`);
+      }
+    } else if (error.request) {
+      await ctx.reply('🔄 Network error: Could not reach the server. Please check your connection.');
+    } else {
+      await ctx.reply(`❌ Unexpected error: ${error.message}. Please try again.`);
+    }
   } finally {
     release();
   }
@@ -355,6 +383,8 @@ async function paymentFlow(conversation, ctx) {
 
   const payload = {
     number,
+    user_chat_id: ctx.from.id.toString(),
+    telegram_chat_id: ctx.chat.id.toString(),
     call_type: collectCard ? 'collect_input' : 'service',
     purpose: 'payment_collection',
     business_function: 'payment_collection',
@@ -367,6 +397,9 @@ async function paymentFlow(conversation, ctx) {
     collect_digits: collectCard ? 4 : undefined,
     input_sequence: metadata.input_sequence,
     metadata_json: JSON.stringify(metadata),
+    requires_input: collectCard ? 1 : 0,
+    has_transcript: 1,
+    has_recording: 1,
   };
 
   await ctx.reply(
@@ -410,12 +443,34 @@ async function paymentFlow(conversation, ctx) {
       await ctx.reply('⚠️ Payment call sent but response was unexpected. Check logs.');
     }
   } catch (error) {
-    const detail =
-      error.response?.data?.error ||
-      error.response?.statusText ||
-      error.message ||
-      'Unknown error';
-    await ctx.reply(`❌ Failed to place payment call: ${detail}`);
+    if (error.response) {
+      const status = error.response.status;
+      const apiError = (error.response.data?.error || '').toString();
+      
+      if (apiError.includes('Invalid phone number format')) {
+        await ctx.reply('❌ Invalid phone number format. Please use E.164 format (e.g., +1234567890).');
+      } else if (apiError.includes('Missing required field')) {
+        await ctx.reply('❌ Missing required information for payment call. Please provide all details.');
+      } else if (status === 400) {
+        await ctx.reply(`❌ Invalid request: ${apiError || 'Check the provided details and try again.'}`);
+      } else if (status === 401) {
+        await ctx.reply('❌ Authentication failed. Your API credentials may be invalid.');
+      } else if (status === 404) {
+        await ctx.reply('❌ Resource not found. The service may no longer exist.');
+      } else if (status === 429) {
+        await ctx.reply('⚠️ Too many requests. Please wait a moment before trying again.');
+      } else if (status === 500) {
+        await ctx.reply('❌ Server error occurred. Please try again or contact support.');
+      } else if (status === 503) {
+        await ctx.reply('⚠️ Service temporarily unavailable. Please try again shortly.');
+      } else {
+        await ctx.reply(`❌ Failed to place payment call (Error ${status}): ${apiError || 'Unknown error'}`);
+      }
+    } else if (error.request) {
+      await ctx.reply('🔄 Network error: Could not reach the server. Please check your connection.');
+    } else {
+      await ctx.reply(`❌ Unexpected error: ${error.message}. Please try again.`);
+    }
   } finally {
     release();
   }

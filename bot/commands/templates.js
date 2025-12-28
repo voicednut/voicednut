@@ -655,7 +655,8 @@ async function previewCallTemplate(conversation, ctx, template, ensureActive) {
 
   const payload = {
     number: testNumber,
-    user_chat_id: ctx.from.id.toString()
+    user_chat_id: ctx.from.id.toString(),
+    telegram_chat_id: ctx.chat.id.toString(),
   };
 
   if (template.business_id) {
@@ -683,6 +684,12 @@ async function previewCallTemplate(conversation, ctx, template, ensureActive) {
   if (persona.technical_level) {
     payload.technical_level = persona.technical_level;
   }
+  
+  // Unified pipeline capability flags
+  const inputCallPurposes = ['collect_input', 'order_lookup', 'payment', 'verification', 'otp'];
+  payload.requires_input = inputCallPurposes.includes(payload.purpose || '') ? 1 : 0;
+  payload.has_transcript = 1;
+  payload.has_recording = 1;
 
   try {
     await axios.post(`${config.apiUrl}/outbound-call`, payload, {
@@ -693,7 +700,33 @@ async function previewCallTemplate(conversation, ctx, template, ensureActive) {
     await ctx.reply('✅ Preview call launched! You should receive a call shortly.');
   } catch (error) {
     console.error('Failed to launch preview call:', error?.response?.data || error.message);
-    await ctx.reply(`❌ Preview failed: ${error?.response?.data?.error || error.message}`);
+    
+    if (error.response) {
+      const status = error.response.status;
+      const apiError = (error.response.data?.error || '').toString();
+      
+      if (apiError.includes('Invalid phone number format')) {
+        await ctx.reply('❌ Invalid phone number format. Please use E.164 format (e.g., +1234567890).');
+      } else if (apiError.includes('Missing required field')) {
+        await ctx.reply('❌ Missing required information. Please check the template configuration.');
+      } else if (status === 400) {
+        await ctx.reply(`❌ Invalid request: ${apiError || 'Check the provided details and try again.'}`);
+      } else if (status === 401) {
+        await ctx.reply('❌ Authentication failed. Your API credentials may be invalid.');
+      } else if (status === 429) {
+        await ctx.reply('⚠️ Too many requests. Please wait a moment before trying again.');
+      } else if (status === 500) {
+        await ctx.reply('❌ Server error occurred. Please try again or contact support.');
+      } else if (status === 503) {
+        await ctx.reply('⚠️ Service temporarily unavailable. Please try again shortly.');
+      } else {
+        await ctx.reply(`❌ Preview failed: ${apiError || error.message}`);
+      }
+    } else if (error.request) {
+      await ctx.reply('🔄 Network error: Could not reach the server. Please check your connection.');
+    } else {
+      await ctx.reply(`❌ Unexpected error: ${error.message}`);
+    }
   }
 }
 
