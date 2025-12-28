@@ -139,6 +139,30 @@ function replacePlaceholders(text = '', values = {}) {
   return output;
 }
 
+const TEMPLATE_CATEGORIES = [
+  { id: 'call', label: '☎️ Call' },
+  { id: 'otp', label: '🔐 OTP' },
+  { id: 'payment', label: '💳 Payment' }
+];
+
+async function selectTemplateCategory(conversation, ctx, ensureActive, { allowAll = false } = {}) {
+  const options = allowAll
+    ? [{ id: 'all', label: '📚 All' }, ...TEMPLATE_CATEGORIES]
+    : [...TEMPLATE_CATEGORIES];
+
+  const choice = await askOptionWithButtons(
+    conversation,
+    ctx,
+    'Select a template category:',
+    options,
+    { prefix: 'template-category', columns: 2, ensureActive }
+  );
+  if (!choice) {
+    return null;
+  }
+  return choice.id;
+}
+
 async function promptText(
   conversation,
   ctx,
@@ -679,6 +703,11 @@ async function createCallTemplateFlow(conversation, ctx, ensureActive) {
   const safeEnsureActive = typeof ensureActive === 'function'
     ? ensureActive
     : () => ensureOperationActive(ctx, getCurrentOpId(ctx));
+  const category = await selectTemplateCategory(conversation, ctx, safeEnsureActive);
+  if (!category) {
+    await ctx.reply('❌ Template creation cancelled.');
+    return;
+  }
   const name = await promptText(
     conversation,
     ctx,
@@ -730,7 +759,8 @@ async function createCallTemplateFlow(conversation, ctx, ensureActive) {
     persona_config: personaResult.persona_config,
     prompt: promptAndVoice.prompt,
     first_message: promptAndVoice.first_message,
-    voice_model: promptAndVoice.voice_model || null
+    voice_model: promptAndVoice.voice_model || null,
+    category
   };
 
   try {
@@ -959,16 +989,26 @@ async function listCallTemplatesFlow(conversation, ctx, ensureActive) {
   const safeEnsureActive = typeof ensureActive === 'function'
     ? ensureActive
     : () => ensureOperationActive(ctx, getCurrentOpId(ctx));
+  const category = await selectTemplateCategory(conversation, ctx, safeEnsureActive, { allowAll: true });
+  if (!category) {
+    await ctx.reply('❌ Listing cancelled.');
+    return;
+  }
   try {
     const templates = await fetchCallTemplates();
     safeEnsureActive();
-    const validTemplates = (templates || []).filter((template) => template && typeof template.id !== 'undefined' && template.id !== null);
+    const validTemplates = (templates || []).filter((template) => {
+      if (!template || typeof template.id === 'undefined' || template.id === null) return false;
+      if (category === 'all') return true;
+      const cat = (template.category || 'call').toLowerCase();
+      return cat === category;
+    });
 
     if (!validTemplates.length) {
       if (templates && templates.length && templates.some((t) => !t || typeof t.id === 'undefined')) {
         console.warn('Template list contained invalid entries, ignoring malformed records.');
       }
-      await ctx.reply('ℹ️ No call templates found. Use the create action to add one.');
+      await ctx.reply('ℹ️ No call templates found in this category. Use the create action to add one.');
       return;
     }
 

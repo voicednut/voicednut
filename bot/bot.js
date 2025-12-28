@@ -610,6 +610,24 @@ bot.on('callback_query:data', async (ctx) => {
         const action = ctx.callbackQuery.data;
         console.log(`Callback query received: ${action} from user ${ctx.from.id}`);
 
+        // Let conversation-specific callbacks (prefixed with data:) pass through unless explicitly handled below
+        const isConversationCallback =
+            action.includes(':') &&
+            !action.startsWith('FOLLOWUP_CALL:') &&
+            !action.startsWith('FOLLOWUP_SMS:') &&
+            !action.startsWith('PROVIDER_SET:');
+        if (isConversationCallback) {
+            // Allow the conversations middleware to handle this callback without side effects
+            return;
+        }
+
+        // Gracefully handle expired template designer callbacks instead of showing generic errors
+        const lowerAction = action.toLowerCase();
+        if (lowerAction.startsWith('call-template') || lowerAction.startsWith('sms-template') || lowerAction.startsWith('confirm')) {
+            await ctx.reply('⚠️ That template action has expired. Please run /templates and try again.');
+            return;
+        }
+
         // Verify user authorization
         const user = await new Promise(r => getUser(ctx.from.id, r));
         if (!user) {
