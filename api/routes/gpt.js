@@ -2,6 +2,7 @@ require('colors');
 const EventEmitter = require('events');
 const OpenAI = require('openai');
 const PersonalityEngine = require('../functions/PersonalityEngine');
+const config = require('../config');
 
 const DEFAULT_SYSTEM_PROMPT =
   'You are an intelligent AI assistant capable of adapting to different business contexts and customer needs. Be professional, helpful, and responsive to customer communication styles. You must add a \'•\' symbol every 5 to 10 words at natural pauses where your response can be split for text to speech.';
@@ -12,8 +13,8 @@ class EnhancedGptService extends EventEmitter {
   constructor(customPrompt = null, customFirstMessage = null) {
     super();
     
-    const openAiKey = process.env.OPENAI_API_KEY;
-    const openRouterKey = process.env.OPENROUTER_API_KEY;
+    const openAiKey = config.openai.apiKey;
+    const openRouterKey = config.openRouter.apiKey;
     this.enabled = Boolean(openRouterKey || openAiKey);
 
     if (openRouterKey) {
@@ -21,16 +22,16 @@ class EnhancedGptService extends EventEmitter {
         baseURL: "https://openrouter.ai/api/v1",
         apiKey: openRouterKey,
         defaultHeaders: {
-          "HTTP-Referer": process.env.YOUR_SITE_URL || "http://localhost:3000",
-          "X-Title": process.env.YOUR_SITE_NAME || "Adaptive Voice AI",
+          "HTTP-Referer": config.openRouter.siteUrl,
+          "X-Title": config.openRouter.siteName,
         }
       });
-      this.model = process.env.OPENROUTER_MODEL || "meta-llama/llama-3.1-8b-instruct:free";
+      this.model = config.openRouter.model;
     } else if (openAiKey) {
       this.openai = new OpenAI({
         apiKey: openAiKey
       });
-      this.model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+      this.model = config.openai.model;
     } else {
       this.openai = null;
       this.model = null;

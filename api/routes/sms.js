@@ -1,37 +1,40 @@
 const EventEmitter = require('events');
 const axios = require('axios');
+const OpenAI = require('openai');
 const PersonaComposer = require('../services/PersonaComposer');
+const config = require('../config');
 
 class EnhancedSmsService extends EventEmitter {
     constructor(options = {}) {
         super();
         const { provider = 'twilio', awsAdapter = null, twilioClient = null } = options;
         this.provider = provider;
-        if (provider === 'twilio') {
-            this.twilio = twilioClient || require('twilio')(
-                process.env.TWILIO_ACCOUNT_SID,
-                process.env.TWILIO_AUTH_TOKEN
-            );
-        } else {
-            this.twilio = twilioClient || null;
-        }
+        this.twilio = provider === 'twilio'
+            ? (twilioClient || require('twilio')(config.twilio.accountSid, config.twilio.authToken))
+            : twilioClient || null;
         this.awsAdapter = awsAdapter || null;
-        this.openai = new(require('openai'))({
-            baseURL: "https://openrouter.ai/api/v1",
-            apiKey: process.env.OPENROUTER_API_KEY,
-            defaultHeaders: {
-                "HTTP-Referer": process.env.YOUR_SITE_URL || "http://localhost:3000",
-                "X-Title": process.env.YOUR_SITE_NAME || "SMS AI Assistant",
+        const openRouterKey = config.openRouter.apiKey;
+        const openAiKey = config.openai.apiKey;
+        const apiKey = openRouterKey || openAiKey;
+        const clientOptions = openRouterKey
+            ? {
+                baseURL: "https://openrouter.ai/api/v1",
+                apiKey,
+                defaultHeaders: {
+                    "HTTP-Referer": config.openRouter.siteUrl,
+                    "X-Title": config.openRouter.siteName || "SMS AI Assistant",
+                }
             }
-        });
-        this.model = process.env.OPENROUTER_MODEL || "meta-llama/llama-3.1-8b-instruct:free";
+            : { apiKey };
+        this.openai = new OpenAI(clientOptions);
+        this.model = openRouterKey ? config.openRouter.model : config.openai.model;
 
         // SMS conversation tracking
         this.activeConversations = new Map();
         this.messageQueue = new Map(); // Queue for outbound messages
         this.personaComposer = new PersonaComposer();
         this.defaultSmsPersona = {
-            businessId: process.env.DEFAULT_SMS_BUSINESS_ID || null,
+            businessId: config.sms.defaultBusinessId,
             purpose: 'customer_service',
             channel: 'sms',
             emotion: 'neutral',
@@ -113,8 +116,8 @@ class EnhancedSmsService extends EventEmitter {
             }
             if (!this.twilio) {
                 this.twilio = require('twilio')(
-                    process.env.TWILIO_ACCOUNT_SID,
-                    process.env.TWILIO_AUTH_TOKEN
+                    config.twilio.accountSid,
+                    config.twilio.authToken
                 );
             }
             this.awsAdapter = null;
@@ -123,8 +126,8 @@ class EnhancedSmsService extends EventEmitter {
             this.vonageAdapter = null;
             if (!this.twilio) {
                 this.twilio = require('twilio')(
-                    process.env.TWILIO_ACCOUNT_SID,
-                    process.env.TWILIO_AUTH_TOKEN
+                    config.twilio.accountSid,
+                    config.twilio.authToken
                 );
             }
         }
@@ -204,7 +207,7 @@ class EnhancedSmsService extends EventEmitter {
     // Send individual SMS
     async sendSMS(to, message, from = null, personaOverrides = null) {
         try {
-            const fromNumber = from || process.env.FROM_NUMBER;
+            const fromNumber = from || config.twilio.fromNumber;
 
             if (this.provider !== 'aws' && !fromNumber) {
                 throw new Error('No FROM_NUMBER configured for SMS');
@@ -232,6 +235,11 @@ class EnhancedSmsService extends EventEmitter {
             let messageSid = null;
             let status = null;
             let fromNumberUsed = fromNumber;
+            const statusCallbackBase = config.server.hostname ? `https://${config.server.hostname}` : null;
+            const statusCallbackUrl = statusCallbackBase ? `${statusCallbackBase}/webhook/sms-status` : null;
+            if (!statusCallbackUrl) {
+                console.warn('⚠️ SMS status callback URL is not configured (server.hostname missing).');
+            }
 
             if (this.provider === 'aws') {
                 if (!this.awsAdapter) {
@@ -260,7 +268,7 @@ class EnhancedSmsService extends EventEmitter {
                     to,
                     body: message,
                     from,
-                    statusCallback: `https://${process.env.SERVER}/webhook/sms-status`
+                    statusCallback: statusCallbackUrl || undefined
                 });
 
                 const [vonageResult] = response.messages || [];
@@ -277,7 +285,7 @@ class EnhancedSmsService extends EventEmitter {
                     body: message,
                     from: fromNumber,
                     to: to,
-                    statusCallback: `https://${process.env.SERVER}/webhook/sms-status`
+                    statusCallback: statusCallbackUrl || undefined
                 });
 
                 providerResponse = smsMessage;

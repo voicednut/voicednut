@@ -2,16 +2,17 @@ require('colors');
 const { createClient, LiveTranscriptionEvents } = require('@deepgram/sdk');
 const { Buffer } = require('node:buffer');
 const EventEmitter = require('events');
+const config = require('../config');
 
 
 class TranscriptionService extends EventEmitter {
   constructor() {
     super();
-    const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
+    const deepgram = createClient(config.deepgram.apiKey);
     this.dgConnection = deepgram.listen.live({
       encoding: 'mulaw',
       sample_rate: '8000',
-      model: 'nova-2',
+      model: config.deepgram.streamingModel,
       punctuate: true,
       interim_results: true,
       endpointing: 200,

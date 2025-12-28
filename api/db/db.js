@@ -1,12 +1,15 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const config = require('../config');
 const { cleanTranscript } = require('../utils/transcript');
 
 class EnhancedDatabase {
     constructor() {
         this.db = null;
         this.isInitialized = false;
-        this.dbPath = path.join(__dirname, 'data.db');
+        this.dbPath = path.isAbsolute(config.database.path)
+            ? config.database.path
+            : path.join(process.cwd(), config.database.path);
     }
 
     async connect() {

@@ -270,12 +270,12 @@ try {
     {
       method: 'POST',
       headers: {
-        'xi-api-key': process.env.XI_API_KEY,
+        'xi-api-key': '<XI_API_KEY>',
         'Content-Type': 'application/json',
         accept: 'audio/wav',
       },
       body: JSON.stringify({
-        model_id: process.env.XI_MODEL_ID,
+        model_id: '<XI_MODEL_ID>',
         text: partialResponse,
       }),
     }

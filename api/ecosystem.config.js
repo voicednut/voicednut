@@ -62,11 +62,11 @@ module.exports = {
         NODE_ENV: 'production',
         PORT: 1337,
         // Add your production environment variables here
-        // SERVER: process.env.SERVER,
-        // TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID,
-        // TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN,
-        // FROM_NUMBER: process.env.FROM_NUMBER,
-        // OPENAI_API_KEY: process.env.OPENAI_API_KEY
+        // SERVER: '<your-server-hostname>',
+        // TWILIO_ACCOUNT_SID: '<twilio-sid>',
+        // TWILIO_AUTH_TOKEN: '<twilio-auth-token>',
+        // FROM_NUMBER: '<twilio-from-number>',
+        // OPENAI_API_KEY: '<openai-api-key>'
       },
       
       env_development: {

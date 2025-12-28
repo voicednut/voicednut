@@ -6,6 +6,7 @@ const {
   ensureOperationActive,
   registerAbortController,
   OperationCancelledError,
+  ensureFlow,
   guardAgainstCommandInterrupt,
 } = require('../utils/sessionState');
 const { askOptionWithButtons } = require('../utils/persona');
@@ -199,8 +200,9 @@ async function otpFlow(conversation, ctx) {
     return;
   }
 
-  startOperation(ctx, 'otp-call');
-  const ensureActive = () => {};
+  const opId = startOperation(ctx, 'otp-call');
+  const flow = ensureFlow(ctx, 'otp-call', { step: 'start' });
+  const ensureActive = () => ensureOperationActive(ctx, opId);
 
   const number = await promptForValue(
     conversation,

@@ -1,4 +1,5 @@
 const axios = require('axios');
+const config = require('../config');
 const {
   formatSummary,
   decryptDigits,
@@ -7,6 +8,7 @@ const {
   isSensitiveStage,
   getRawDigits,
 } = require('../utils/dtmf');
+const config = require('../config');
 
 function parseDtmfMetadata(metadata) {
   if (!metadata) {
@@ -303,7 +305,7 @@ class EnhancedWebhookService {
     this.isRunning = false;
     this.interval = null;
     this.db = null;
-    this.telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
+    this.telegramBotToken = config.telegram.botToken;
     this.processInterval = 3000; // Check every 3 seconds for faster updates
     this.activeCallStatus = new Map(); // Track call status to avoid duplicates
     this.callTimestamps = new Map(); // Track call timing for better status management

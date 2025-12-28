@@ -8,7 +8,8 @@
     "db:migrate": "node scripts/db-migrate.js",
     "dev": "npm run db:migrate && nodemon app.js",
     "start": "npm run db:migrate && node app.js",
-    "setup": "node setup-env.js"
+    "setup": "node setup-env.js",
+    "lint:env": "node scripts/check-env.js"
   },
   "keywords": [],
   "author": "Tunde Ednut",

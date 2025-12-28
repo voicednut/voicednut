@@ -1,0 +1,23 @@
+{
+  "env": {
+    "commonjs": true,
+    "node": true,
+    "es2021": true
+  },
+  "overrides": [
+    {
+      "files": ["**/*.js"],
+      "excludedFiles": ["config.js"],
+      "rules": {
+        "no-restricted-properties": [
+          "error",
+          {
+            "object": "process",
+            "property": "env",
+            "message": "Use config.js as the single source of configuration."
+          }
+        ]
+      }
+    }
+  ]
+}
