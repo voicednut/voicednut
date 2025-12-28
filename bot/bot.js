@@ -331,8 +331,7 @@ const {
     updateProvider,
     SUPPORTED_PROVIDERS,
 } = require('./commands/provider');
-const { otpFlow } = require('./commands/otp');
-const { paymentFlow } = require('./commands/payment');
+const { otpFlow, paymentFlow } = require('./commands/callFlows');
 const {
     fetchPending: fetchPendingNotifications,
     markNotification,

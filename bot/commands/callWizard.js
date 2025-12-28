@@ -18,26 +18,17 @@ async function callWizardFlow(conversation, ctx) {
 
   await ctx.reply('Choose the call type:', { reply_markup: keyboard });
 
-  let selection = null;
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const update = await conversation.wait();
-    const text = update?.message?.text;
-    if (isSlashCommandInput(text)) {
-      // Another command took over; stop this wizard quietly
-      return;
-    }
-    const data = update?.callback_query?.data;
-    if (data && data.startsWith('call:')) {
-      selection = data.replace('call:', '');
-      try {
-        await ctx.answerCallbackQuery();
-      } catch (e) {
-        // ignore
-      }
-      break;
-    }
-    await ctx.reply('Please tap one of the options to continue.');
+  // Wait specifically for a category selection callback
+  const selectionCtx = await conversation.waitFor('callback_query:data');
+  const data = selectionCtx?.callbackQuery?.data || '';
+  if (!data.startsWith('call:')) {
+    return;
+  }
+  const selection = data.replace('call:', '');
+  try {
+    await selectionCtx.answerCallbackQuery();
+  } catch (e) {
+    // ignore
   }
 
   await setWizardState(ctx.from.id, ctx.chat.id, selection, {});
