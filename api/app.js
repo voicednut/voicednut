@@ -8,7 +8,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
 
-const { platform, server: serverConfig, twilio: twilioConfig, aws: awsConfig, vonage: vonageConfig, admin: adminConfig, compliance: complianceConfig, deepgram: deepgramConfig } = require('./config');
+const { platform, server: serverConfig, twilio: twilioConfig, aws: awsConfig, vonage: vonageConfig, admin: adminConfig, compliance: complianceConfig, deepgram: deepgramConfig, telegram: telegramConfig } = require('./config');
 const { EnhancedGptService, DEFAULT_SYSTEM_PROMPT, DEFAULT_FIRST_MESSAGE } = require('./routes/gpt');
 const { getBusinessProfile } = require('./config/business');
 const { StreamService } = require('./routes/stream');
@@ -2016,10 +2016,18 @@ async function startServer() {
 
     await synchronizeProviderFromSettings();
 
+    // Initialize webhookService with Twilio client for REST API reconciliation
+    let twilioClient = null;
+    if (currentProvider === 'twilio' && twilioAccountSid && twilioAuthToken) {
+      twilioClient = require('twilio')(twilioAccountSid, twilioAuthToken);
+      webhookService.twilioClient = twilioClient;
+      console.log('✅ Twilio REST client initialized for webhook reconciliation'.green);
+    }
+
     // Start webhook service after database is ready
     console.log('Starting enhanced webhook service...'.yellow);
     webhookService.start(db);
-    console.log('✅ Enhanced webhook service started'.green);
+    console.log('✅ Enhanced webhook service started (with V2 premium features)'.green);
 
     // Initialize function engine
     console.log('✅ Dynamic Function Engine ready'.green);
@@ -3173,7 +3181,19 @@ app.post('/outbound-call', async (req, res) => {
       }
       callPhases.set(callSid, { phase: 'intro', updated_at: Date.now() });
 
-      if (user_chat_id) {
+      // Send premium header via V2 features (if chat ID present)
+      if (resolvedTelegramChatId && webhookService) {
+        setImmediate(() => {
+          webhookService.sendPremiumHeader(resolvedTelegramChatId, callSid, {
+            to: number,
+            callType: callType,
+            templateName: templateName
+          }).catch(error => {
+            console.error(`Failed to send premium header: ${error.message}`);
+          });
+        });
+      } else if (user_chat_id) {
+        // Fallback to old notification system if webhookService not available
         const headerPayload = JSON.stringify({
           to: number,
           from: twilioFromNumber,
@@ -3724,34 +3744,51 @@ app.post('/webhook/call-status', async (req, res) => {
 
       console.log(`📱 Webhook: ${CallSid} status: ${normalizedStatus} @ ${nowIso}`.blue);
 
-      if (['answered', 'in-progress'].includes(normalizedStatus) || (normalizedStatus === 'completed' && durationValue > 0)) {
-        updateData.was_answered = 1;
-        if (call && !call.started_at) {
-          updateData.started_at = new Date().toISOString();
+      // Use V2 webhook handler for premium Telegram notifications if available
+      if (webhookService && targetChat) {
+        setImmediate(async () => {
+          try {
+            await webhookService.handleTwilioWebhookV2(CallSid, normalizedStatus, {
+              duration: durationValue,
+              answeredBy: AnsweredBy,
+              errorCode: ErrorCode,
+              errorMessage: ErrorMessage
+            }, call);
+          } catch (handlerError) {
+            console.error(`V2 Webhook handler error: ${handlerError.message}`);
+          }
+        });
+      } else {
+        // Fallback to old notification system
+        if (['answered', 'in-progress'].includes(normalizedStatus) || (normalizedStatus === 'completed' && durationValue > 0)) {
+          updateData.was_answered = 1;
+          if (call && !call.started_at) {
+            updateData.started_at = new Date().toISOString();
+          }
+          await enqueueStatus('call_answered', { ...basePayload, status: 'answered' }, 'high');
+          if (normalizedStatus === 'in-progress') {
+            await enqueueStatus('call_in_progress', { ...basePayload, status: 'in-progress' }, 'normal');
+          }
+        } else if (normalizedStatus === 'ringing') {
+          await enqueueStatus('call_ringing', basePayload, 'high');
+        } else if (['queued', 'initiated'].includes(normalizedStatus)) {
+          await enqueueStatus('call_initiated', basePayload, 'normal');
         }
-        await enqueueStatus('call_answered', { ...basePayload, status: 'answered' }, 'high');
-        if (normalizedStatus === 'in-progress') {
-          await enqueueStatus('call_in_progress', { ...basePayload, status: 'in-progress' }, 'normal');
-        }
-      } else if (normalizedStatus === 'ringing') {
-        await enqueueStatus('call_ringing', basePayload, 'high');
-      } else if (['queued', 'initiated'].includes(normalizedStatus)) {
-        await enqueueStatus('call_initiated', basePayload, 'normal');
-      }
 
-      if (['completed', 'no-answer', 'failed', 'busy', 'canceled'].includes(normalizedStatus)) {
-        if (call && !call.ended_at) {
-          updateData.ended_at = new Date().toISOString();
+        if (['completed', 'no-answer', 'failed', 'busy', 'canceled'].includes(normalizedStatus)) {
+          if (call && !call.ended_at) {
+            updateData.ended_at = new Date().toISOString();
+          }
+          await enqueueStatus(`call_${normalizedStatus.replace('-', '_')}`, { ...basePayload, duration: durationValue });
+          const outcomePayload = {
+            success: normalizedStatus === 'completed',
+            finalStatus: normalizedStatus,
+            reason: normalizedStatus,
+            duration: durationValue,
+            answered_by: AnsweredBy || null
+          };
+          await enqueueStatus('call_final_outcome', outcomePayload, 'normal');
         }
-        await enqueueStatus(`call_${normalizedStatus.replace('-', '_')}`, { ...basePayload, duration: durationValue });
-        const outcomePayload = {
-          success: normalizedStatus === 'completed',
-          finalStatus: normalizedStatus,
-          reason: normalizedStatus,
-          duration: durationValue,
-          answered_by: AnsweredBy || null
-        };
-        await enqueueStatus('call_final_outcome', outcomePayload, 'normal');
       }
 
       if (normalizedStatus === 'no-answer' && call?.created_at) {

@@ -1,4 +1,5 @@
 const axios = require('axios');
+const crypto = require('crypto');
 const config = require('../config');
 const {
   formatSummary,
@@ -8,6 +9,35 @@ const {
   isSensitiveStage,
   getRawDigits,
 } = require('../utils/dtmf');
+
+// Premium UI status mappings (V2 features)
+const STATUS_EMOJIS = {
+  'initiated': '📤',
+  'ringing': '🔔',
+  'answered': '✅',
+  'in-progress': '🟢',
+  'completed': '🏁',
+  'busy': '🚫',
+  'no-answer': '⏳',
+  'canceled': '⚠️',
+  'failed': '❌',
+  'human': '👤',
+  'machine': '🤖'
+};
+
+const STATUS_MESSAGES = {
+  'initiated': 'Call initiated',
+  'ringing': 'Ringing…',
+  'answered': 'Answered',
+  'in-progress': 'In progress',
+  'completed': 'Completed',
+  'busy': 'Busy',
+  'no-answer': 'No answer',
+  'canceled': 'Canceled',
+  'failed': 'Failed',
+  'human': 'Human detected',
+  'machine': 'Machine/voicemail detected'
+};
 
 function parseDtmfMetadata(metadata) {
   if (!metadata) {
@@ -300,14 +330,21 @@ function collectInputLines(metadata = {}, entries = [], options = {}) {
 }
 
 class EnhancedWebhookService {
-  constructor() {
+  constructor(twilioClient = null) {
     this.isRunning = false;
     this.interval = null;
     this.db = null;
     this.telegramBotToken = config.telegram.botToken;
+    this.twilioClient = twilioClient; // For REST API reconciliation
     this.processInterval = 3000; // Check every 3 seconds for faster updates
     this.activeCallStatus = new Map(); // Track call status to avoid duplicates
     this.callTimestamps = new Map(); // Track call timing for better status management
+    
+    // V2 Features: Sequential message delivery & deduplication
+    this.messageQueues = new Map(); // callSid → { chatId, queue: [], processing: false }
+    this.sentStatuses = new Map(); // callSid → Set of sent status strings
+    this.processedEvents = new Map(); // callSid → Set of processed event hashes
+
     this.statusOrder = ['queued', 'initiated', 'ringing', 'in-progress', 'answered', 'completed', 'busy', 'no-answer', 'failed', 'canceled'];
     
     // Telegram notification system (unified pipeline)
@@ -1981,6 +2018,327 @@ class EnhancedWebhookService {
     }
   }
 
+  // ========== V2 PREMIUM FEATURES: Sequential Message Delivery & Accurate Status ==========
+
+  /**
+   * Send premium header message (V2 feature)
+   * Called once when call is initiated - no CallSid displayed
+   */
+  async sendPremiumHeader(chatId, callSid, callConfig) {
+    const { to, callType, templateName } = callConfig;
+    const typeLabel = callType === 'collect_input' ? 'Input Collection' : 'Service Call';
+    const templateLabel = templateName ? `Template: <b>${templateName}</b>` : 'Default';
+    
+    const headerText = 
+      `📞 <b>Call in Progress</b>\n\n` +
+      `To: <b>${to}</b>\n` +
+      `Type: ${typeLabel}\n` +
+      `${templateLabel}\n\n` +
+      `Status updates below…`;
+
+    try {
+      const buttons = [
+        { text: '📝 Transcript', callback_data: `transcript:${callSid}` },
+        { text: '🎧 Recording', callback_data: `recording:${callSid}` },
+        { text: '📊 Timeline', callback_data: `timeline:${callSid}` },
+        { text: 'ℹ️ Details', callback_data: `details:${callSid}` }
+      ];
+
+      const response = await this.api.post('/sendMessage', {
+        chat_id: chatId,
+        text: headerText,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [buttons] }
+      });
+
+      const headerMessageId = response.data.result.message_id;
+      await this.db.updateCall(callSid, { telegram_header_message_id: headerMessageId });
+
+      // Initialize message queue for this call
+      this.messageQueues.set(callSid, {
+        chatId,
+        queue: [],
+        processing: false
+      });
+      this.sentStatuses.set(callSid, new Set());
+      this.processedEvents.set(callSid, new Set());
+
+      console.log(`📱 Premium header sent for ${callSid}`.green);
+      return headerMessageId;
+    } catch (error) {
+      console.error(`Failed to send premium header for ${callSid}:`, error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Queue a status update for sequential delivery (V2 feature)
+   */
+  queuePremiumStatusUpdate(chatId, callSid, status, additionalText = null) {
+    if (!this.messageQueues.has(callSid)) {
+      this.messageQueues.set(callSid, {
+        chatId,
+        queue: [],
+        processing: false
+      });
+      this.sentStatuses.set(callSid, new Set());
+    }
+
+    const emoji = STATUS_EMOJIS[status] || '•';
+    const baseMessage = STATUS_MESSAGES[status] || status;
+    const fullMessage = additionalText ? `${baseMessage}: ${additionalText}` : baseMessage;
+    const messageKey = `${emoji} ${fullMessage}`;
+
+    // Check for duplicates
+    const sentSet = this.sentStatuses.get(callSid);
+    if (sentSet && sentSet.has(messageKey)) {
+      console.log(`⊘ Duplicate status skipped: ${messageKey} for ${callSid}`);
+      return false;
+    }
+
+    // Enqueue message
+    const queue = this.messageQueues.get(callSid);
+    queue.queue.push({
+      status,
+      emoji,
+      text: fullMessage,
+      messageKey,
+      timestamp: Date.now()
+    });
+
+    sentSet.add(messageKey);
+
+    // Start processing if not already
+    this._processMessageQueue(callSid);
+    return true;
+  }
+
+  /**
+   * Process message queue sequentially (V2 feature)
+   */
+  async _processMessageQueue(callSid) {
+    const queue = this.messageQueues.get(callSid);
+    if (!queue || queue.processing || queue.queue.length === 0) {
+      return;
+    }
+
+    queue.processing = true;
+
+    while (queue.queue.length > 0) {
+      const message = queue.queue.shift();
+      
+      try {
+        const callRecord = await this.db.getCall(callSid);
+        if (callRecord && callRecord.telegram_header_message_id) {
+          const text = `${message.emoji} ${message.text}`;
+          await this.api.post('/sendMessage', {
+            chat_id: queue.chatId,
+            text: text,
+            reply_to_message_id: callRecord.telegram_header_message_id,
+            parse_mode: 'HTML'
+          });
+          console.log(`✓ Sent to Telegram: ${text}`.cyan);
+        }
+        
+        // Spacing between messages (random 150-300ms)
+        const delay = 150 + Math.random() * 150;
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } catch (error) {
+        console.error(`Failed to send update for ${callSid}:`, error.message);
+      }
+    }
+
+    queue.processing = false;
+  }
+
+  /**
+   * Reconcile webhook status with Twilio REST API (V2 feature)
+   */
+  async reconcileWithTwilio(callSid, webhookStatus) {
+    if (!this.twilioClient) {
+      return { success: false, finalStatus: webhookStatus };
+    }
+
+    try {
+      const twilioCall = await this.twilioClient.calls(callSid).fetch();
+      const twilioStatus = twilioCall.status.toLowerCase();
+      const restDuration = parseInt(twilioCall.duration || 0, 10) || 0;
+
+      console.log(
+        `📊 Twilio REST reconciliation for ${callSid}:\n` +
+        `   Webhook status: ${webhookStatus}\n` +
+        `   Twilio status: ${twilioStatus}\n` +
+        `   Duration: ${restDuration}s`.cyan
+      );
+
+      let finalStatus = webhookStatus;
+      if (['completed', 'busy', 'no-answer', 'failed', 'canceled'].includes(twilioStatus)) {
+        finalStatus = twilioStatus;
+      }
+
+      return {
+        success: true,
+        finalStatus: this._normalizeStatus(finalStatus),
+        duration: restDuration
+      };
+    } catch (error) {
+      console.warn(`Failed to reconcile with Twilio REST API: ${error.message}`);
+      return { success: false, finalStatus: webhookStatus };
+    }
+  }
+
+  /**
+   * Handle Twilio webhook with V2 features (V2 feature)
+   */
+  async handleTwilioWebhookV2(callSid, callStatus, payload, callRecord = null) {
+    const normalizedStatus = this._normalizeStatus(callStatus);
+    const eventHash = this._hashEvent(callSid, normalizedStatus, payload);
+
+    if (!this.processedEvents.has(callSid)) {
+      this.processedEvents.set(callSid, new Set());
+    }
+
+    const processedSet = this.processedEvents.get(callSid);
+    if (processedSet.has(eventHash)) {
+      console.log(`⊘ Duplicate webhook ignored: ${callSid} ${normalizedStatus}`);
+      return { success: true, duplicate: true };
+    }
+
+    processedSet.add(eventHash);
+
+    let call = callRecord;
+    if (!call) {
+      try {
+        call = await this.db.getCall(callSid);
+      } catch (error) {
+        console.warn(`Failed to load call ${callSid}:`, error.message);
+      }
+    }
+
+    if (!call) {
+      console.warn(`Call not found: ${callSid}`);
+      return { success: false };
+    }
+
+    const telegramChatId = call.telegram_chat_id || call.user_chat_id;
+    if (!telegramChatId) {
+      return { success: true, notified: false };
+    }
+
+    const { duration, answeredBy } = payload;
+    const durationSeconds = parseInt(duration || 0, 10) || 0;
+
+    // Handle terminal states with reconciliation
+    if (['completed', 'busy', 'no-answer', 'failed', 'canceled'].includes(normalizedStatus)) {
+      const reconciled = await this.reconcileWithTwilio(callSid, normalizedStatus);
+      const finalStatus = reconciled.finalStatus || normalizedStatus;
+
+      // Queue status update
+      this.queuePremiumStatusUpdate(telegramChatId, callSid, finalStatus);
+
+      // Queue final outcome
+      await this._queueFinalOutcome(telegramChatId, callSid, {
+        success: finalStatus === 'completed',
+        finalStatus: finalStatus,
+        reason: finalStatus,
+        duration: reconciled.duration || durationSeconds,
+        answeredBy: answeredBy
+      });
+    } else {
+      // Handle intermediate statuses
+      this.queuePremiumStatusUpdate(telegramChatId, callSid, normalizedStatus);
+    }
+
+    return { success: true, notified: true };
+  }
+
+  /**
+   * Send final outcome with buttons (V2 feature)
+   */
+  async _queueFinalOutcome(chatId, callSid, outcome) {
+    const callRecord = await this.db.getCall(callSid);
+    if (!callRecord || !callRecord.telegram_header_message_id) {
+      return;
+    }
+
+    const { success, finalStatus, reason, duration } = outcome;
+    const icon = success ? '✅' : '❌';
+    const statusText = success 
+      ? 'Completed successfully'
+      : `Not completed: ${reason || finalStatus}`;
+    
+    let durationText = '';
+    if (duration && duration > 0) {
+      const minutes = Math.floor(duration / 60);
+      const seconds = duration % 60;
+      durationText = `\n⏱️ Duration: ${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+    }
+
+    const finalText = `${icon} ${statusText}${durationText}`;
+
+    try {
+      const buttons = [
+        { text: '📝 View Transcript', callback_data: `transcript:${callSid}` },
+        { text: '🎧 Recording', callback_data: `recording:${callSid}` },
+        { text: '📊 Timeline', callback_data: `timeline:${callSid}` },
+        { text: 'ℹ️ Call Details', callback_data: `details:${callSid}` }
+      ];
+
+      await this.api.post('/sendMessage', {
+        chat_id: chatId,
+        text: finalText,
+        reply_to_message_id: callRecord.telegram_header_message_id,
+        reply_markup: { inline_keyboard: [buttons] },
+        parse_mode: 'HTML'
+      });
+
+      await this.db.updateCall(callSid, {
+        telegram_final_outcome_sent: 1,
+        telegram_outcome: JSON.stringify(outcome)
+      });
+
+      console.log(`✓ Final outcome sent for ${callSid}`.green);
+    } catch (error) {
+      console.error(`Failed to send final outcome for ${callSid}:`, error.message);
+    }
+  }
+
+  /**
+   * Normalize status string (V2 helper)
+   */
+  _normalizeStatus(status) {
+    const normalized = (status || '').toLowerCase().trim();
+    if (normalized === 'queued') return 'initiated';
+    if (normalized === 'no_answer') return 'no-answer';
+    if (normalized === 'in-progress') return 'in-progress';
+    const valid = ['initiated', 'ringing', 'answered', 'in-progress', 'completed', 'busy', 'no-answer', 'failed', 'canceled'];
+    return valid.includes(normalized) ? normalized : (normalized || 'initiated');
+  }
+
+  /**
+   * Hash event for deduplication (V2 helper)
+   */
+  _hashEvent(callSid, status, payload) {
+    const data = JSON.stringify({ callSid, status, duration: payload?.duration });
+    return crypto.createHash('sha256').update(data).digest('hex');
+  }
+
+  /**
+   * Cleanup call resources (V2 helper)
+   */
+  cleanupCall(callSid) {
+    const queue = this.messageQueues.get(callSid);
+    if (queue) {
+      queue.queue = [];
+      queue.processing = false;
+    }
+    this.messageQueues.delete(callSid);
+    this.sentStatuses.delete(callSid);
+    this.processedEvents.delete(callSid);
+  }
+
+  // ========== End V2 Features ==========
+
   // Get notification performance metrics
   getNotificationMetrics() {
     return {
@@ -1989,7 +2347,9 @@ class EnhancedWebhookService {
       active_call_tracking: this.activeCallStatus.size,
       call_timestamps_tracked: this.callTimestamps.size,
       telegram_bot_configured: !!this.telegramBotToken,
-      enhanced_features_enabled: true
+      enhanced_features_enabled: true,
+      message_queues_active: this.messageQueues.size,
+      v2_features_enabled: true
     };
   }
 }
