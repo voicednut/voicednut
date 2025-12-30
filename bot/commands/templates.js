@@ -72,6 +72,11 @@ async function templatesApiRequest(options) {
 }
 
 function formatTemplatesApiError(error, action) {
+  // Friendly empty-state if no templates yet
+  if (error?.response?.status === 404 && /not\s+found/i.test(error.response.data?.error || '')) {
+    return '📄 No available templates yet.';
+  }
+
   const baseHelp = `Ensure the templates service is reachable at ${config.templatesApiUrl} or update TEMPLATES_API_URL.`;
 
   const apiCode = error.response?.data?.code || error.code;
@@ -114,7 +119,7 @@ function formatTemplatesApiError(error, action) {
   }
 
   if (error.request) {
-    return `❌ ${action}: No response from Templates API. ${baseHelp}`;
+    return '📄 No available templates yet.';
   }
 
   return `❌ ${action}: ${error.message}`;
