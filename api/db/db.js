@@ -248,6 +248,189 @@ class EnhancedDatabase {
                 table: 'call_inputs',
                 column: 'label',
                 ignoreErrors: ['duplicate column']
+            },
+            // Campaign tables
+            {
+                name: 'create_campaigns_table',
+                sql: `CREATE TABLE IF NOT EXISTS campaigns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    campaign_id TEXT UNIQUE NOT NULL,
+                    business_id TEXT NOT NULL,
+                    user_chat_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    status TEXT DEFAULT 'draft',
+                    persona TEXT,
+                    template TEXT,
+                    start_time DATETIME,
+                    end_time DATETIME,
+                    call_frequency TEXT DEFAULT 'normal',
+                    max_calls_per_second REAL DEFAULT 1.0,
+                    max_calls_per_minute INTEGER DEFAULT 10,
+                    max_retry_attempts INTEGER DEFAULT 3,
+                    do_not_call_filter BOOLEAN DEFAULT 1,
+                    voicemail_detection BOOLEAN DEFAULT 1,
+                    voicemail_message TEXT,
+                    timezone TEXT DEFAULT 'UTC',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    scheduled_at DATETIME,
+                    completed_at DATETIME,
+                    paused_at DATETIME,
+                    metadata TEXT
+                )`
+            },
+            {
+                name: 'create_campaign_contacts_table',
+                sql: `CREATE TABLE IF NOT EXISTS campaign_contacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    contact_id TEXT UNIQUE NOT NULL,
+                    campaign_id TEXT NOT NULL,
+                    phone_number TEXT NOT NULL,
+                    name TEXT,
+                    email TEXT,
+                    segment TEXT,
+                    priority INTEGER DEFAULT 0,
+                    custom_data TEXT,
+                    do_not_call BOOLEAN DEFAULT 0,
+                    dnc_reason TEXT,
+                    status TEXT DEFAULT 'pending',
+                    call_count INTEGER DEFAULT 0,
+                    last_called_at DATETIME,
+                    first_call_at DATETIME,
+                    outcome TEXT,
+                    notes TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (campaign_id) REFERENCES campaigns(campaign_id) ON DELETE CASCADE
+                )`
+            },
+            {
+                name: 'create_campaign_calls_table',
+                sql: `CREATE TABLE IF NOT EXISTS campaign_calls (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    call_id TEXT UNIQUE NOT NULL,
+                    campaign_id TEXT NOT NULL,
+                    contact_id TEXT,
+                    call_sid TEXT,
+                    phone_number TEXT NOT NULL,
+                    call_type TEXT DEFAULT 'outbound',
+                    status TEXT DEFAULT 'initiated',
+                    duration INTEGER DEFAULT 0,
+                    sentiment TEXT,
+                    outcome TEXT,
+                    failure_reason TEXT,
+                    transcript TEXT,
+                    recording_url TEXT,
+                    ai_summary TEXT,
+                    conversion_result BOOLEAN,
+                    retry_count INTEGER DEFAULT 0,
+                    next_retry_at DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    started_at DATETIME,
+                    ended_at DATETIME,
+                    FOREIGN KEY (campaign_id) REFERENCES campaigns(campaign_id) ON DELETE CASCADE,
+                    FOREIGN KEY (contact_id) REFERENCES campaign_contacts(contact_id) ON DELETE SET NULL
+                )`
+            },
+            {
+                name: 'create_campaign_metrics_table',
+                sql: `CREATE TABLE IF NOT EXISTS campaign_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    campaign_id TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    total_dialed INTEGER DEFAULT 0,
+                    total_answered INTEGER DEFAULT 0,
+                    total_voicemail INTEGER DEFAULT 0,
+                    total_no_answer INTEGER DEFAULT 0,
+                    total_failed INTEGER DEFAULT 0,
+                    total_completed INTEGER DEFAULT 0,
+                    total_conversions INTEGER DEFAULT 0,
+                    average_duration INTEGER DEFAULT 0,
+                    average_sentiment TEXT,
+                    dnc_hits INTEGER DEFAULT 0,
+                    cost REAL DEFAULT 0.0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(campaign_id, date),
+                    FOREIGN KEY (campaign_id) REFERENCES campaigns(campaign_id) ON DELETE CASCADE
+                )`
+            },
+            {
+                name: 'create_do_not_call_registry_table',
+                sql: `CREATE TABLE IF NOT EXISTS do_not_call_registry (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    phone_number TEXT UNIQUE NOT NULL,
+                    name TEXT,
+                    reason TEXT DEFAULT 'unknown',
+                    source TEXT,
+                    added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    expires_at DATETIME,
+                    notes TEXT
+                )`
+            },
+            {
+                name: 'create_campaign_schedules_table',
+                sql: `CREATE TABLE IF NOT EXISTS campaign_schedules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    schedule_id TEXT UNIQUE NOT NULL,
+                    campaign_id TEXT NOT NULL,
+                    recurrence TEXT,
+                    recurrence_pattern TEXT,
+                    next_execution DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (campaign_id) REFERENCES campaigns(campaign_id) ON DELETE CASCADE
+                )`
+            },
+            {
+                name: 'create_campaign_segment_metrics_table',
+                sql: `CREATE TABLE IF NOT EXISTS campaign_segment_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    campaign_id TEXT NOT NULL,
+                    segment TEXT NOT NULL,
+                    total_dialed INTEGER DEFAULT 0,
+                    total_answered INTEGER DEFAULT 0,
+                    answer_rate REAL DEFAULT 0.0,
+                    conversion_count INTEGER DEFAULT 0,
+                    conversion_rate REAL DEFAULT 0.0,
+                    average_duration INTEGER DEFAULT 0,
+                    average_sentiment TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (campaign_id) REFERENCES campaigns(campaign_id) ON DELETE CASCADE
+                )`
+            },
+            {
+                name: 'create_campaign_templates_table',
+                sql: `CREATE TABLE IF NOT EXISTS campaign_templates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    template_id TEXT UNIQUE NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    persona TEXT,
+                    script TEXT,
+                    default_frequency TEXT DEFAULT 'normal',
+                    metadata TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )`
+            },
+            {
+                name: 'idx_campaigns_status',
+                sql: 'CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(status)'
+            },
+            {
+                name: 'idx_campaigns_business',
+                sql: 'CREATE INDEX IF NOT EXISTS idx_campaigns_business ON campaigns(business_id)'
+            },
+            {
+                name: 'idx_campaign_contacts_campaign',
+                sql: 'CREATE INDEX IF NOT EXISTS idx_campaign_contacts_campaign ON campaign_contacts(campaign_id)'
+            },
+            {
+                name: 'idx_campaign_calls_campaign',
+                sql: 'CREATE INDEX IF NOT EXISTS idx_campaign_calls_campaign ON campaign_calls(campaign_id)'
             }
         ];
 
