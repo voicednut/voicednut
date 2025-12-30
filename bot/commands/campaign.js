@@ -501,73 +501,76 @@ function registerCampaignCommand(bot, allowedChatIds = new Set()) {
   });
 
   // Handle campaign callbacks
-  bot.on('callback_query', async (ctx) => {
-    const data = ctx.callbackQuery.data;
+  bot.on('callback_query', async (ctx, next) => {
+    const data = ctx.callbackQuery?.data;
+    if (!data || !data.startsWith('campaign:')) {
+      return next();
+    }
 
-    if (data.startsWith('campaign:')) {
-      const [action, subaction, campaignId] = data.split(':');
+    const [action, subaction, campaignId] = data.split(':');
 
-      try {
-        const apiUrl = process.env.API_URL || 'http://localhost:3001';
+    try {
+      const apiUrl = process.env.API_URL || 'http://localhost:3001';
 
-        switch (subaction) {
-          case 'view':
-            const campaign = await axios.get(`${apiUrl}/api/campaigns/${campaignId}`);
-            const campaignData = campaign.data.campaign;
+      switch (subaction) {
+        case 'view': {
+          const campaign = await axios.get(`${apiUrl}/api/campaigns/${campaignId}`);
+          const campaignData = campaign.data.campaign;
 
-            let viewMessage = `📊 Campaign: ${campaignData.name}\n\n`;
-            viewMessage += `Status: ${campaignData.status}\n`;
-            viewMessage += `Persona: ${campaignData.persona}\n`;
-            viewMessage += `Frequency: ${campaignData.call_frequency}\n`;
-            viewMessage += `Created: ${new Date(campaignData.created_at).toLocaleDateString()}\n`;
+          let viewMessage = `📊 Campaign: ${campaignData.name}\n\n`;
+          viewMessage += `Status: ${campaignData.status}\n`;
+          viewMessage += `Persona: ${campaignData.persona}\n`;
+          viewMessage += `Frequency: ${campaignData.call_frequency}\n`;
+          viewMessage += `Created: ${new Date(campaignData.created_at).toLocaleDateString()}\n`;
 
-            const buttons = [];
-            if (campaignData.status === 'draft') {
-              buttons.push(
-                { text: '🚀 Start Campaign', callback_data: `campaign:start:${campaignId}` }
-              );
-            } else if (campaignData.status === 'active') {
-              buttons.push(
-                { text: '⏸️ Pause', callback_data: `campaign:pause:${campaignId}` }
-              );
-            }
+          const buttons = [];
+          if (campaignData.status === 'draft') {
             buttons.push(
-              { text: '📊 Analytics', callback_data: `campaign:analytics:${campaignId}` }
+              { text: '🚀 Start Campaign', callback_data: `campaign:start:${campaignId}` }
             );
+          } else if (campaignData.status === 'active') {
+            buttons.push(
+              { text: '⏸️ Pause', callback_data: `campaign:pause:${campaignId}` }
+            );
+          }
+          buttons.push(
+            { text: '📊 Analytics', callback_data: `campaign:analytics:${campaignId}` }
+          );
 
-            await ctx.editMessageText(viewMessage, {
-              reply_markup: {
-                inline_keyboard: [buttons]
-              }
-            });
-            break;
-
-          case 'start':
-            await axios.post(`${apiUrl}/api/campaigns/${campaignId}/start`);
-            await ctx.answerCallbackQuery('✅ Campaign started!', { show_alert: true });
-            break;
-
-          case 'pause':
-            await axios.post(`${apiUrl}/api/campaigns/${campaignId}/pause`);
-            await ctx.answerCallbackQuery('⏸️ Campaign paused', { show_alert: true });
-            break;
-
-          case 'analytics':
-            const analytics = await axios.get(`${apiUrl}/api/campaigns/${campaignId}/analytics`);
-            const summary = analytics.data.summary;
-
-            let analyticsMsg = `📈 Campaign Analytics\n\n`;
-            analyticsMsg += `📞 Dialed: ${summary.totalCalls}\n`;
-            analyticsMsg += `✅ Conversions: ${summary.conversions}\n`;
-            analyticsMsg += `📊 Rate: ${summary.conversionRate}%\n`;
-            analyticsMsg += `⏱️ Avg: ${summary.avgDuration}s`;
-
-            await ctx.editMessageText(analyticsMsg);
-            break;
+          await ctx.editMessageText(viewMessage, {
+            reply_markup: {
+              inline_keyboard: [buttons]
+            }
+          });
+          break;
         }
-      } catch (error) {
-        await ctx.answerCallbackQuery(`❌ Error: ${error.message}`, { show_alert: true });
+
+        case 'start':
+          await axios.post(`${apiUrl}/api/campaigns/${campaignId}/start`);
+          await ctx.answerCallbackQuery('✅ Campaign started!', { show_alert: true });
+          break;
+
+        case 'pause':
+          await axios.post(`${apiUrl}/api/campaigns/${campaignId}/pause`);
+          await ctx.answerCallbackQuery('⏸️ Campaign paused', { show_alert: true });
+          break;
+
+        case 'analytics': {
+          const analytics = await axios.get(`${apiUrl}/api/campaigns/${campaignId}/analytics`);
+          const summary = analytics.data.summary;
+
+          let analyticsMsg = `📈 Campaign Analytics\n\n`;
+          analyticsMsg += `📞 Dialed: ${summary.totalCalls}\n`;
+          analyticsMsg += `✅ Conversions: ${summary.conversions}\n`;
+          analyticsMsg += `📊 Rate: ${summary.conversionRate}%\n`;
+          analyticsMsg += `⏱️ Avg: ${summary.avgDuration}s`;
+
+          await ctx.editMessageText(analyticsMsg);
+          break;
+        }
       }
+    } catch (error) {
+      await ctx.answerCallbackQuery(`❌ Error: ${error.message}`, { show_alert: true });
     }
   });
 
