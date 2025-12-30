@@ -1,6 +1,6 @@
 require('colors');
 const express = require('express');
-const { validateResult, body } = require('express-validator');
+const { validationResult, body } = require('express-validator');
 const CampaignManager = require('../services/CampaignManager');
 const DNCChecker = require('../services/DNCChecker');
 
@@ -23,7 +23,7 @@ module.exports = function(app, { db }) {
     body('template').optional().trim()
   ], async (req, res) => {
     try {
-      const errors = validateResult(req);
+      const errors = validationResult(req);
       if (!errors.isEmpty()) {
         return res.status(400).json({ errors: errors.array() });
       }
