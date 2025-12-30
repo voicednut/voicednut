@@ -28,8 +28,40 @@ const { v4: uuidv4 } = require('uuid');
 const dtmfUtils = require('./utils/dtmf');
 const { normalizeAnsweredBy, isHumanAnsweredBy, isMachineAnsweredBy } = require('./utils/amd');
 const ProviderRegistry = require('./services/ProviderRegistry');
+const OtpScenarioEngine = require('./services/OtpScenarioEngine');
+const OtpRoutes = require('./routes/otp');
+const { CallHandlerFactory } = require('./handlers');
 
 const VoiceResponse = require('twilio').twiml.VoiceResponse;
+
+// ============================================================================
+// GLOBAL ERROR HANDLERS - Prevent crashes and ensure graceful degradation
+// ============================================================================
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+  // Log to database if available
+  if (global.db && typeof global.db.logServiceHealth === 'function') {
+    global.db.logServiceHealth('unhandled_rejection', 'error', {
+      reason: String(reason),
+      stack: reason?.stack || 'N/A'
+    }).catch(e => console.warn('Failed to log unhandled rejection:', e.message));
+  }
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('💥 Uncaught Exception:', error.message);
+  if (global.db && typeof global.db.logServiceHealth === 'function') {
+    global.db.logServiceHealth('uncaught_exception', 'error', {
+      error: error.message,
+      stack: error.stack
+    }).catch(e => console.warn('Failed to log uncaught exception:', e.message));
+  }
+  // Exit gracefully after logging
+  setTimeout(() => process.exit(1), 1000);
+});
 
 const app = express();
 ExpressWs(app);
@@ -118,6 +150,72 @@ const providerRegistry = new ProviderRegistry({
   supportedProviders: SUPPORTED_CALL_PROVIDERS
 });
 let providersRegistered = false;
+
+// ============================================================================
+// UNIFIED CALL HANDLER MANAGEMENT - Prevents memory leaks and resource exhaustion
+// ============================================================================
+const callHandlers = new Map(); // callSid -> handler instance
+
+/**
+ * Create and register a call handler
+ */
+function createCallHandler(callType, metadata, options = {}) {
+  try {
+    const handler = CallHandlerFactory.createHandler(callType, metadata, {
+      ...options,
+      db
+    });
+    
+    if (handler && handler.callSid) {
+      callHandlers.set(handler.callSid, handler);
+    }
+    
+    return handler;
+  } catch (error) {
+    console.error('❌ Failed to create call handler:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Get a registered handler
+ */
+function getCallHandler(callSid) {
+  return callHandlers.get(callSid) || null;
+}
+
+/**
+ * Cleanup a single handler and remove from registry
+ */
+async function removeCallHandler(callSid, reason = 'normal') {
+  try {
+    const handler = callHandlers.get(callSid);
+    if (handler) {
+      await handler.cleanup(reason);
+      callHandlers.delete(callSid);
+    }
+  } catch (error) {
+    console.warn(`Error cleaning up handler ${callSid}:`, error.message);
+  }
+}
+
+/**
+ * Cleanup ALL handlers - called on shutdown
+ */
+async function cleanupAllHandlers() {
+  console.log(`🧹 Cleaning up ${callHandlers.size} active handlers...`);
+  
+  for (const [callSid, handler] of callHandlers.entries()) {
+    try {
+      await handler.cleanup('shutdown');
+    } catch (error) {
+      console.warn(`Failed to cleanup ${callSid}:`, error.message);
+    }
+  }
+  
+  callHandlers.clear();
+  console.log('✅ All handlers cleaned up');
+}
 
 const COLLECT_INPUT_FUNCTIONS = new Set(['ivr_survey', 'pin_entry', 'menu_selection', 'otp_collection', 'account_verification']);
 const collectInputCompletion = new Set();
@@ -1489,6 +1587,14 @@ async function finalizeCollectInputCall(callSid, callDetails) {
     if (callConfigurations.has(callSid)) {
       removeCallConfiguration(callSid);
     }
+
+    // Cleanup handler and resources
+    try {
+      await removeCallHandler(callSid, 'input_collection_completed');
+    } catch (cleanupError) {
+      console.warn(`⚠️ Failed to cleanup handler for ${callSid}:`, cleanupError.message);
+    }
+
     setTimeout(() => collectInputCompletion.delete(callSid), 60 * 60 * 1000);
   } catch (error) {
     console.error('Failed to finalize collect-input call:', error);
@@ -1576,6 +1682,13 @@ async function finalizeCallOutcome(callSid, options = {}) {
       'high',
       JSON.stringify({ outcome, answered_by: answeredCandidate })
     );
+  }
+
+  // Cleanup handler and associated resources
+  try {
+    await removeCallHandler(callSid, 'outcome_finalized');
+  } catch (cleanupError) {
+    console.warn(`⚠️ Failed to cleanup handler for ${callSid}:`, cleanupError.message);
   }
 }
 
@@ -2032,11 +2145,34 @@ async function startServer() {
     // Initialize function engine
     console.log('✅ Dynamic Function Engine ready'.green);
 
+    // Initialize OTP Scenario Engine
+    console.log('Initializing OTP Scenario Engine...'.yellow);
+    const otpEngine = new OtpScenarioEngine(db, {
+      dtmfEncryption: compliance.dtmfEncryptionKey ? true : false,
+      dtmfEncryptionKey: compliance.dtmfEncryptionKey
+    });
+    
+    const otpRoutes = new OtpRoutes({
+      db,
+      otpEngine,
+      providerRegistry,
+      telegramNotifier: null, // Will be set if Telegram is configured
+      serverUrl: publicHttpBase,
+      config: {
+        twilio: twilioConfig,
+        dtmfEncryptionKey: compliance.dtmfEncryptionKey
+      }
+    });
+
+    app.use('/otp', otpRoutes.getRouter());
+    console.log('✅ OTP Collection System initialized'.green);
+
     // Start HTTP server
     app.listen(PORT, () => {
       console.log(`✅ Enhanced Adaptive API server running on port ${PORT}`.green);
       console.log(`🎭 System ready - Personality Engine & Dynamic Functions active`.green);
       console.log(`📱 Enhanced webhook notifications enabled`.green);
+      console.log(`🔐 OTP Collection System ready at /otp endpoint`.green);
     });
 
   } catch (error) {
@@ -2213,6 +2349,17 @@ app.ws('/connection', (ws) => {
       });
 
       await emitRealtimeDtmfInsights(summary, metadataEnvelope);
+
+      // Invoke handler for DTMF processing if available
+      try {
+        const handler = getCallHandler(callSid);
+        if (handler && typeof handler.handleDtmf === 'function') {
+          await handler.handleDtmf(digits);
+        }
+      } catch (handlerError) {
+        console.warn(`⚠️ Handler DTMF processing failed for ${callSid}:`, handlerError.message);
+        // Continue - handler invocation shouldn't block DTMF processing
+      }
     };
 
     ws.on('message', async function message(data) {
@@ -2722,6 +2869,13 @@ async function handleCallEnd(callSid, callStartTime) {
     }
     callPhases.delete(callSid);
 
+    // Cleanup handler and resources
+    try {
+      await removeCallHandler(callSid, 'call_ended');
+    } catch (cleanupError) {
+      console.warn(`⚠️ Failed to cleanup handler for ${callSid}:`, cleanupError.message);
+    }
+
   } catch (error) {
     console.error('Error handling enhanced adaptive call end:', error);
     
@@ -2734,6 +2888,13 @@ async function handleCallEnd(callSid, callStartTime) {
       });
     } catch (logError) {
       console.error('Failed to log service health error:', logError);
+    }
+
+    // Cleanup handler even on error
+    try {
+      await removeCallHandler(callSid, 'error');
+    } catch (cleanupError) {
+      console.warn(`⚠️ Failed to cleanup handler for ${callSid} after error:`, cleanupError.message);
     }
   }
 }
@@ -3131,6 +3292,22 @@ app.post('/outbound-call', async (req, res) => {
       console.warn(`Failed to initialize input orchestrator for ${callSid}:`, orchestratorError.message);
     }
     callFunctionSystems.set(callSid, functionSystem);
+
+    // Create and register handler for this call
+    try {
+      const handler = createCallHandler(callType, metadataSerialized || {}, {
+        db,
+        provider: currentProvider,
+        template: templateName
+      });
+      if (handler) {
+        handler.callSid = callSid;
+        console.log(`📱 Handler registered for ${callSid}: ${handler.constructor.name}`.cyan);
+      }
+    } catch (handlerError) {
+      console.warn(`⚠️ Failed to create handler for ${callSid}:`, handlerError.message);
+      // Continue anyway - handler is optional enhancement
+    }
 
     try {
       const businessContextRecord = {
@@ -3815,6 +3992,17 @@ app.post('/webhook/call-status', async (req, res) => {
         await db.updateCallStatus(CallSid, normalizedStatus, updateData);
       }
 
+      // Invoke handler for status update if available
+      try {
+        const handler = getCallHandler(CallSid);
+        if (handler && typeof handler.handleStatus === 'function') {
+          await handler.handleStatus(normalizedStatus);
+        }
+      } catch (handlerError) {
+        console.warn(`⚠️ Handler status update failed for ${CallSid}:`, handlerError.message);
+        // Continue - handler invocation shouldn't block webhook processing
+      }
+
       await transitionCallState(CallSid, mappedState, {
         provider_status: CallStatus,
         answered_by: AnsweredBy,
@@ -4292,6 +4480,45 @@ app.get('/health', async (req, res) => {
         available_templates: functionEngine ? functionEngine.getBusinessAnalysis().availableTemplates.length : 0,
         active_function_systems: callFunctionSystems.size
       },
+      handler_diagnostics: {
+        active_handlers: callHandlers.size,
+        handlers_by_type: Array.from(callHandlers.values()).reduce((acc, handler) => {
+          const type = handler.callType || 'unknown';
+          acc[type] = (acc[type] || 0) + 1;
+          return acc;
+        }, {}),
+        detailed_handlers: Array.from(callHandlers.values()).map(handler => {
+          const health = handler.getHealthStatus?.() || {};
+          const state = handler.getState?.() || {};
+          return {
+            callSid: health.callSid,
+            type: handler.callType,
+            phase: health.conversationPhase,
+            uptime_ms: health.uptime,
+            interaction_count: health.interactionCount,
+            circuit_breaker: health.circuitBreaker || null,
+            error_metrics: state.errors || { errorCount: 0 },
+            services: {
+              gpt_active: health.gptServiceActive,
+              input_orchestrator_active: health.inputOrchestratorActive
+            }
+          };
+        }),
+        circuit_breaker_states: Array.from(callHandlers.values())
+          .filter(h => h.gptCircuitBreaker)
+          .map(h => ({
+            callSid: h.callSid,
+            state: h.gptCircuitBreaker.getState()
+          })),
+        error_summary: {
+          total_handlers_with_errors: Array.from(callHandlers.values()).filter(h => h.errorMetrics?.errorCount > 0).length,
+          total_errors: Array.from(callHandlers.values()).reduce((sum, h) => sum + (h.errorMetrics?.errorCount || 0), 0),
+          recent_errors: Array.from(callHandlers.values())
+            .flatMap(h => (h.errorMetrics?.errorLog || []).map(e => ({ callSid: h.callSid, ...e })))
+            .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+            .slice(0, 5)
+        }
+      },
       system_health: recentHealthLogs
     });
   } catch (error) {
@@ -4311,6 +4538,61 @@ app.get('/health', async (req, res) => {
           reason: 'Database connection failed'
         }
       }
+    });
+  }
+});
+
+// Resource monitoring endpoint
+app.get('/api/system/resources', async (req, res) => {
+  try {
+    const memoryUsage = process.memoryUsage();
+    const uptime = process.uptime();
+    
+    res.json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      process: {
+        uptime_seconds: Math.floor(uptime),
+        memory: {
+          rss_mb: Math.round(memoryUsage.rss / 1024 / 1024),
+          heap_used_mb: Math.round(memoryUsage.heapUsed / 1024 / 1024),
+          heap_total_mb: Math.round(memoryUsage.heapTotal / 1024 / 1024),
+          external_mb: Math.round(memoryUsage.external / 1024 / 1024)
+        }
+      },
+      handlers: {
+        active_count: callHandlers.size,
+        breakdown: Array.from(callHandlers.values()).reduce((acc, h) => {
+          const type = h.callType || 'unknown';
+          if (!acc[type]) acc[type] = { count: 0, uptime_ms: [], errors: [] };
+          acc[type].count++;
+          acc[type].uptime_ms.push(Date.now() - h.startTime);
+          if (h.errorMetrics?.errorCount > 0) {
+            acc[type].errors.push({ callSid: h.callSid, errorCount: h.errorMetrics.errorCount });
+          }
+          return acc;
+        }, {}),
+        avg_uptime_by_type: Object.entries(Array.from(callHandlers.values()).reduce((acc, h) => {
+          const type = h.callType || 'unknown';
+          if (!acc[type]) acc[type] = [];
+          acc[type].push(Date.now() - h.startTime);
+          return acc;
+        }, {})).reduce((acc, [type, uptimes]) => {
+          acc[type] = Math.round(uptimes.reduce((a, b) => a + b, 0) / uptimes.length);
+          return acc;
+        }, {})
+      },
+      system_health: {
+        total_errors_since_start: Array.from(callHandlers.values()).reduce((sum, h) => sum + (h.errorMetrics?.errorCount || 0), 0),
+        handlers_with_errors: Array.from(callHandlers.values()).filter(h => h.errorMetrics?.errorCount > 0).length,
+        circuit_breaker_open_count: Array.from(callHandlers.values()).filter(h => h.gptCircuitBreaker?.getState()?.state === 'OPEN').length
+      }
+    });
+  } catch (error) {
+    console.error('Error getting system resources:', error);
+    res.status(500).json({
+      status: 'error',
+      error: error.message
     });
   }
 });
@@ -6685,10 +6967,14 @@ process.on('SIGINT', async () => {
   console.log('\n🛑 Shutting down enhanced adaptive system gracefully...'.yellow);
   
   try {
+    console.log(`🧹 Cleaning up ${callHandlers.size} active handlers...`);
+    await cleanupAllHandlers();
+    
     // Log shutdown start
     await db.logServiceHealth('system', 'shutdown_initiated', {
       active_calls: callConfigurations.size,
-      tracked_calls: callFunctionSystems.size
+      tracked_calls: callFunctionSystems.size,
+      active_handlers: callHandlers.size
     });
     
     // Stop services
@@ -6698,7 +6984,8 @@ process.on('SIGINT', async () => {
     
     // Log successful shutdown
     await db.logServiceHealth('system', 'shutdown_completed', {
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      handler_count_at_shutdown: callHandlers.size
     });
     
     await db.close();
@@ -6711,13 +6998,17 @@ process.on('SIGINT', async () => {
 });
 
 process.on('SIGTERM', async () => {
-  console.log('\n🛑 Shutting down enhanced adaptive system gracefully...'.yellow);
+  console.log('\n🛑 Shutting down enhanced adaptive system gracefully (SIGTERM)...'.yellow);
   
   try {
+    console.log(`🧹 Cleaning up ${callHandlers.size} active handlers...`);
+    await cleanupAllHandlers();
+    
     // Log shutdown start
     await db.logServiceHealth('system', 'shutdown_initiated', {
       active_calls: callConfigurations.size,
       tracked_calls: callFunctionSystems.size,
+      active_handlers: callHandlers.size,
       reason: 'SIGTERM'
     });
     
@@ -6728,7 +7019,8 @@ process.on('SIGTERM', async () => {
     
     // Log successful shutdown
     await db.logServiceHealth('system', 'shutdown_completed', {
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      handler_count_at_shutdown: callHandlers.size
     });
     
     await db.close();
