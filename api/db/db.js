@@ -103,7 +103,7 @@ class EnhancedDatabase {
 
         if (hasCreated) {
             await this.execute(
-                `UPDATE call_inputs SET created_at = COALESCE(created_at, captured_at, CURRENT_TIMESTAMP) WHERE created_at IS NULL`,
+                `UPDATE call_inputs SET created_at = COALESCE(created_at, captured_at) WHERE created_at IS NULL`,
                 'backfill call_inputs.created_at',
                 { ignoreErrors: ['no such table', 'no such column'] }
             );
@@ -111,7 +111,7 @@ class EnhancedDatabase {
 
         if (hasUpdated) {
             await this.execute(
-                `UPDATE call_inputs SET updated_at = COALESCE(updated_at, captured_at, CURRENT_TIMESTAMP) WHERE updated_at IS NULL`,
+                `UPDATE call_inputs SET updated_at = COALESCE(updated_at, captured_at) WHERE updated_at IS NULL`,
                 'backfill call_inputs.updated_at',
                 { ignoreErrors: ['no such table', 'no such column'] }
             );
