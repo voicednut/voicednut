@@ -795,13 +795,19 @@ bot.command('start', async (ctx) => {
     }
 });
 
-// Enhanced callback query handler
-bot.on('callback_query:data', async (ctx, next) => {
+// Enhanced callback query handler (handle any callback, not just :data filter)
+bot.on('callback_query', async (ctx, next) => {
     try {
+        const action = ctx.callbackQuery?.data;
+        if (!action) {
+            // Nothing to do for non-data callbacks
+            await ctx.answerCallbackQuery();
+            return;
+        }
+
         // Answer callback query immediately to prevent timeout
         await ctx.answerCallbackQuery();
 
-        const action = ctx.callbackQuery.data;
         const userId = ctx.from.id.toString();
         const now = Date.now();
         

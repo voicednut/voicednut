@@ -2,6 +2,35 @@ const axios = require('axios');
 const { InlineKeyboard } = require('grammy');
 const { conversations, createConversation } = require('@grammyjs/conversations');
 
+// Simple inline-button selector to replace missing conversation.select helper
+async function selectFromOptions(conversation, ctx, prompt, options = [], { columns = 2, prefix = 'campaign_sel' } = {}) {
+  const uniquePrefix = `${prefix}:${Math.random().toString(36).slice(2, 8)}`;
+  const keyboard = new InlineKeyboard();
+  options.forEach((option, idx) => {
+    keyboard.text(option.text, `${uniquePrefix}:${option.payload}`);
+    if ((idx + 1) % columns === 0) {
+      keyboard.row();
+    }
+  });
+
+  const sent = await ctx.reply(prompt, { reply_markup: keyboard });
+
+  const selectionCtx = await conversation.waitFor('callback_query', (cbCtx) => {
+    const data = cbCtx.callbackQuery?.data;
+    return Boolean(data && data.startsWith(`${uniquePrefix}:`));
+  });
+
+  await selectionCtx.answerCallbackQuery();
+  try {
+    await ctx.api.editMessageReplyMarkup(sent.chat.id, sent.message_id);
+  } catch (error) {
+    // best-effort cleanup; ignore failures if message already edited/deleted
+  }
+
+  const data = selectionCtx.callbackQuery.data || '';
+  return data.split(':').pop();
+}
+
 /**
  * Campaign Management Command for Telegram
  * Allows users to create, manage, and monitor outbound call campaigns
@@ -10,7 +39,9 @@ const { conversations, createConversation } = require('@grammyjs/conversations')
 async function campaignFlow(conversation, ctx) {
   try {
     // Main menu
-    const choice = await conversation.select(
+    const choice = await selectFromOptions(
+      conversation,
+      ctx,
       '📞 Campaign Manager\n\nWhat would you like to do?',
       [
         { text: '🚀 Create New Campaign', payload: 'create' },
@@ -61,7 +92,9 @@ async function createCampaignFlow(conversation, ctx) {
 
     // Select persona/template
     await ctx.reply('🎭 Select Persona:');
-    const persona = await conversation.select(
+    const persona = await selectFromOptions(
+      conversation,
+      ctx,
       'Which persona for this campaign?',
       [
         { text: '💼 Sales', payload: 'sales' },
@@ -74,7 +107,9 @@ async function createCampaignFlow(conversation, ctx) {
     );
 
     // Call frequency
-    const frequency = await conversation.select(
+    const frequency = await selectFromOptions(
+      conversation,
+      ctx,
       'How often should we dial?',
       [
         { text: '🐢 Conservative (0.5 calls/sec)', payload: 'conservative' },
@@ -86,7 +121,9 @@ async function createCampaignFlow(conversation, ctx) {
     const frequencyMap = { conservative: 0.5, normal: 1.0, aggressive: 2.0 };
 
     // Voicemail detection
-    const vmDetection = await conversation.select(
+    const vmDetection = await selectFromOptions(
+      conversation,
+      ctx,
       'Enable voicemail detection?',
       [
         { text: '✅ Yes', payload: '1' },
@@ -95,7 +132,9 @@ async function createCampaignFlow(conversation, ctx) {
     );
 
     // DNC filtering
-    const dncFilter = await conversation.select(
+    const dncFilter = await selectFromOptions(
+      conversation,
+      ctx,
       'Filter against Do-Not-Call registry?',
       [
         { text: '✅ Yes (Recommended)', payload: '1' },
@@ -133,7 +172,9 @@ async function createCampaignFlow(conversation, ctx) {
       );
 
       // Offer to upload contacts
-      const uploadContacts = await conversation.select(
+      const uploadContacts = await selectFromOptions(
+        conversation,
+        ctx,
         'Upload contact list now?',
         [
           { text: '✅ Yes', payload: 'yes' },
@@ -292,7 +333,9 @@ async function analyticsFlow(conversation, ctx) {
       payload: c.campaign_id
     }));
 
-    const campaignId = await conversation.select(
+    const campaignId = await selectFromOptions(
+      conversation,
+      ctx,
       'Select campaign for analytics:',
       campaignOptions
     );
@@ -328,7 +371,9 @@ async function analyticsFlow(conversation, ctx) {
 
 async function dncManagementFlow(conversation, ctx) {
   try {
-    const dncChoice = await conversation.select(
+    const dncChoice = await selectFromOptions(
+      conversation,
+      ctx,
       '📵 DNC Management',
       [
         { text: '📊 View DNC Stats', payload: 'stats' },

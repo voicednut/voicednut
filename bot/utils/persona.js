@@ -374,8 +374,9 @@ async function askOptionWithButtons(
   });
 
   const message = await ctx.reply(prompt, { parse_mode: 'Markdown', reply_markup: keyboard });
-  const selectionCtx = await conversation.waitFor('callback_query:data', (callbackCtx) => {
-    return callbackCtx.callbackQuery.data.startsWith(`${prefix}:`);
+  const selectionCtx = await conversation.waitFor('callback_query', (callbackCtx) => {
+    const data = callbackCtx.callbackQuery?.data;
+    return Boolean(data && data.startsWith(`${prefix}:`));
   });
   const activeChecker = typeof ensureActive === 'function'
     ? ensureActive
