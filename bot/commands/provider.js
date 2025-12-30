@@ -82,19 +82,19 @@ async function ensureAuthorizedAdmin(ctx) {
 }
 
 async function handleProviderSwitch(ctx, requestedProvider) {
-    await ctx.reply(`🛠 Switching call provider to *${requestedProvider.toUpperCase()}*...`, { parse_mode: 'Markdown' });
+    await ctx.reply(`🛠 <b>Switching Provider</b>\n\n${requestedProvider.toUpperCase()}…`, { parse_mode: 'HTML' });
 
     const result = await updateProvider(requestedProvider);
     const status = await fetchProviderStatus();
 
-    let message = `✅ Call provider set to *${status.provider?.toUpperCase() || requestedProvider.toUpperCase()}*.\n`;
+    let message = `✅ <b>Provider Set</b>\n\n${status.provider?.toUpperCase() || requestedProvider.toUpperCase()}\n`;
     if (result.changed === false) {
-        message = `ℹ️ Provider already set to *${status.provider?.toUpperCase() || requestedProvider.toUpperCase()}*.\n`;
+        message = `ℹ️ <b>Provider Already Set</b>\n\n${status.provider?.toUpperCase() || requestedProvider.toUpperCase()}\n`;
     }
     message += '\n';
     message += formatProviderStatus(status);
 
-    await ctx.reply(message, { parse_mode: 'Markdown' });
+    await ctx.reply(message, { parse_mode: 'HTML' });
 }
 
 function registerProviderCommand(bot) {

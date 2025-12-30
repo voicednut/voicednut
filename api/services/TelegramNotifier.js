@@ -21,20 +21,33 @@ class TelegramNotifier {
   /**
    * Send or update header message for a call
    * Called once when call is initiated
+   * NOTE: Does NOT display CallSid - kept internal only
    */
   async sendHeader(chatId, callSid, callConfig) {
-    const { to, from, callType, templateName } = callConfig;
+    const { to, callType, templateName } = callConfig;
+    const typeLabel = callType === 'collect_input' ? 'Input Collection' : 'Service Call';
+    const templateLabel = templateName ? `Template: ${templateName}` : 'Default';
 
-    const headerText = `📞 Calling ${to}\n` +
-                       `🧾 Type: ${callType || 'service'} • Template: ${templateName || 'default'}\n` +
-                       `🆔 Call SID: ${callSid}\n` +
-                       `📶 Status: initiated`;
+    const headerText = 
+      `📞 <b>Call in Progress</b>\n\n` +
+      `To: <b>${to}</b>\n` +
+      `Type: ${typeLabel}\n` +
+      `${templateLabel}\n\n` +
+      `Status updates below…`;
 
     try {
+      const buttons = [
+        { text: '📝 Transcript', callback_data: `transcript:${callSid}` },
+        { text: '🎧 Recording', callback_data: `recording:${callSid}` },
+        { text: '📊 Timeline', callback_data: `timeline:${callSid}` },
+        { text: 'ℹ️ Details', callback_data: `details:${callSid}` }
+      ];
+
       const response = await this.api.post('/sendMessage', {
         chat_id: chatId,
         text: headerText,
-        parse_mode: 'Markdown'
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [buttons] }
       });
 
       const headerMessageId = response.data.result.message_id;
@@ -52,72 +65,80 @@ class TelegramNotifier {
   }
 
   /**
-   * Queue a status update (debounced within 500ms)
+   * Queue a status update for sequential delivery
+   * Messages are sent one after another with 150-300ms spacing
    */
-  queueStatusUpdate(chatId, callSid, statusUpdate) {
+  async queueStatusUpdate(chatId, callSid, statusUpdate) {
     if (!this.updateQueue.has(callSid)) {
       this.updateQueue.set(callSid, {
         chatId,
-        timer: null,
-        messages: [],
+        queue: [],
+        processing: false,
         lastSentStatus: null
       });
     }
 
     const queue = this.updateQueue.get(callSid);
+    const messageKey = `${statusUpdate.emoji} ${statusUpdate.text}`;
     
     // Avoid duplicate consecutive updates
-    if (queue.lastSentStatus === statusUpdate.emoji + statusUpdate.text) {
+    if (queue.lastSentStatus === messageKey) {
       return;
     }
 
-    queue.messages.push(statusUpdate);
+    queue.queue.push(statusUpdate);
 
-    // Clear existing timer
-    if (queue.timer) clearTimeout(queue.timer);
-
-    // Set new debounce timer (500ms)
-    queue.timer = setTimeout(async () => {
-      await this.flushUpdates(callSid);
-    }, 500);
+    // Process queue if not already processing
+    if (!queue.processing) {
+      this._processStatusQueue(callSid);
+    }
   }
 
   /**
-   * Flush batched updates to Telegram
+   * Process status queue sequentially with spacing
    */
-  async flushUpdates(callSid) {
+  async _processStatusQueue(callSid) {
     const queue = this.updateQueue.get(callSid);
-    if (!queue || queue.messages.length === 0) return;
-
-    const { chatId, messages } = queue;
-    const callRecord = await this.db.getCall(callSid);
-    if (!callRecord || !callRecord.telegram_header_message_id) {
-      console.warn(`No header message for call ${callSid}, skipping updates`);
-      this.updateQueue.delete(callSid);
+    if (!queue || queue.processing) {
       return;
     }
 
-    // Combine messages into a single update text
-    const updateText = messages
-      .map(msg => `${msg.emoji} ${msg.text}`)
-      .join('\n');
+    queue.processing = true;
 
     try {
-      await this.api.post('/sendMessage', {
-        chat_id: chatId,
-        text: updateText,
-        reply_to_message_id: callRecord.telegram_header_message_id,
-        parse_mode: 'Markdown'
-      });
+      const callRecord = await this.db.getCall(callSid);
+      if (!callRecord || !callRecord.telegram_header_message_id) {
+        console.warn(`No header message for call ${callSid}, skipping queued updates`);
+        this.updateQueue.delete(callSid);
+        return;
+      }
 
-      queue.lastSentStatus = updateText;
-    } catch (error) {
-      console.error(`Failed to flush updates for call ${callSid}:`, error.message);
+      while (queue.queue.length > 0) {
+        const statusUpdate = queue.queue.shift();
+        const messageText = `${statusUpdate.emoji} ${statusUpdate.text}`;
+
+        try {
+          await this.api.post('/sendMessage', {
+            chat_id: queue.chatId,
+            text: messageText,
+            reply_to_message_id: callRecord.telegram_header_message_id,
+            parse_mode: 'HTML'
+          });
+
+          queue.lastSentStatus = messageText;
+          
+          // Wait 150-300ms before next message (sequential delivery)
+          if (queue.queue.length > 0) {
+            const delay = 150 + Math.random() * 150;
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+        } catch (error) {
+          console.error(`Failed to send queued status for ${callSid}:`, error.message);
+        }
+      }
+    } finally {
+      queue.processing = false;
     }
-
-    // Clear queue
-    queue.messages = [];
-    queue.timer = null;
   }
 
   /**
@@ -251,12 +272,16 @@ class TelegramNotifier {
 
     // Flush any pending updates first
     if (this.updateQueue.has(callSid)) {
-      await this.flushUpdates(callSid);
+      const queue = this.updateQueue.get(callSid);
+      // Wait for pending queue to finish processing
+      while (queue.processing && queue.queue.length > 0) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
     }
 
     const { success, finalStatus, reason, duration } = outcome;
 
-    const icon = success ? '✅' : '❌';
+    const icon = success ? '🏁' : '❌';
     const statusText = success ? 'Completed successfully.' : `Not completed: ${reason || finalStatus}.`;
     const durationText = duration ? `\n⏱️ Duration: ${Math.round(duration / 60)}m ${duration % 60}s` : '';
 
@@ -267,8 +292,12 @@ class TelegramNotifier {
       const keyboard = {
         inline_keyboard: [
           [
-            { text: '📝 View Transcript', callback_data: `transcript:${callSid}` },
-            { text: '📊 Call Details', callback_data: `details:${callSid}` }
+            { text: '📝 Transcript', callback_data: `transcript:${callSid}` },
+            { text: '🎧 Recording', callback_data: `recording:${callSid}` }
+          ],
+          [
+            { text: '📊 Timeline', callback_data: `timeline:${callSid}` },
+            { text: 'ℹ️ Details', callback_data: `details:${callSid}` }
           ]
         ]
       };
@@ -278,7 +307,7 @@ class TelegramNotifier {
         text: finalText,
         reply_to_message_id: callRecord.telegram_header_message_id,
         reply_markup: keyboard,
-        parse_mode: 'Markdown'
+        parse_mode: 'HTML'
       });
 
       // Store final outcome
@@ -286,6 +315,8 @@ class TelegramNotifier {
         telegram_final_outcome_sent: true,
         telegram_outcome: JSON.stringify(outcome)
       });
+
+      console.log(`✅ Final outcome sent for ${callSid}`);
     } catch (error) {
       console.error(`Failed to send final outcome for call ${callSid}:`, error.message);
     }

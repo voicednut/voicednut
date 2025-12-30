@@ -254,11 +254,11 @@ module.exports = (bot) => {
                     message += `📝 ${apiError.message}`;
                 }
                 
-                await ctx.reply(message, { parse_mode: 'Markdown' });
+                await ctx.reply(message, { parse_mode: 'HTML' });
             }
         } catch (error) {
             console.error('Health command error:', error);
-            await ctx.reply(`🏥 *Health Check*\n\n🤖 Bot: ✅ Responsive\n🌐 API: ❌ Error\n⏰ Checked: ${new Date().toLocaleTimeString()}\n\n📝 ${error.message}`, { parse_mode: 'Markdown' });
+            await ctx.reply(`🏥 <b>Health Check</b>\n\n🤖 Bot: ✅ <b>Responsive</b>\n🌐 API: ❌ <b>Error</b>\n⏰ <b>Checked:</b> ${new Date().toLocaleTimeString()}\n\n📝 ${error.message}`, { parse_mode: 'HTML' });
         }
     });
 };
