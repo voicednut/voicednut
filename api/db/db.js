@@ -277,6 +277,13 @@ class EnhancedDatabase {
                 column: 'updated_at',
                 ignoreErrors: ['duplicate column']
             },
+            {
+                name: 'add_calls_updated_at',
+                sql: 'ALTER TABLE calls ADD COLUMN updated_at DATETIME',
+                table: 'calls',
+                column: 'updated_at',
+                ignoreErrors: ['duplicate column']
+            },
             // Campaign tables
             {
                 name: 'create_campaigns_table',
