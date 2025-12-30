@@ -2151,8 +2151,8 @@ async function startServer() {
     // Initialize OTP Scenario Engine
     console.log('Initializing OTP Scenario Engine...'.yellow);
     const otpEngine = new OtpScenarioEngine(db, {
-      dtmfEncryption: compliance.dtmfEncryptionKey ? true : false,
-      dtmfEncryptionKey: compliance.dtmfEncryptionKey
+      dtmfEncryption: complianceConfig?.encryptionKey ? true : false,
+      dtmfEncryptionKey: complianceConfig?.encryptionKey
     });
     
     const otpRoutes = new OtpRoutes({
@@ -2163,7 +2163,7 @@ async function startServer() {
       serverUrl: publicHttpBase,
       config: {
         twilio: twilioConfig,
-        dtmfEncryptionKey: compliance.dtmfEncryptionKey
+        dtmfEncryptionKey: complianceConfig?.encryptionKey
       }
     });
 

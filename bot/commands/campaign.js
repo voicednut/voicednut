@@ -1,6 +1,6 @@
 const axios = require('axios');
 const { InlineKeyboard } = require('grammy');
-const { createConversation } = require('@grammyjs/conversations');
+const { conversations, createConversation } = require('@grammyjs/conversations');
 
 /**
  * Campaign Management Command for Telegram

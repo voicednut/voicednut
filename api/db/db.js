@@ -67,6 +67,36 @@ class EnhancedDatabase {
         });
     }
 
+    async tableExists(tableName) {
+        return new Promise((resolve, reject) => {
+            this.db.get(
+                `SELECT name FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1`,
+                [tableName],
+                (err, row) => {
+                    if (err) return reject(err);
+                    resolve(Boolean(row));
+                }
+            );
+        });
+    }
+
+    async columnExists(tableName, columnName) {
+        const hasTable = await this.tableExists(tableName);
+        if (!hasTable) return false;
+
+        const safeTableName = tableName.replace(/'/g, "''");
+        return new Promise((resolve, reject) => {
+            this.db.get(
+                `SELECT 1 FROM pragma_table_info('${safeTableName}') WHERE name = ? LIMIT 1`,
+                [columnName],
+                (err, row) => {
+                    if (err) return reject(err);
+                    resolve(Boolean(row));
+                }
+            );
+        });
+    }
+
     async runMigrations() {
         const migrations = [
             {
@@ -91,21 +121,29 @@ class EnhancedDatabase {
             {
                 name: 'add_call_templates_category',
                 sql: 'ALTER TABLE call_templates ADD COLUMN category TEXT',
+                table: 'call_templates',
+                column: 'category',
                 ignoreErrors: ['duplicate column']
             },
             {
                 name: 'add_call_templates_tags',
                 sql: 'ALTER TABLE call_templates ADD COLUMN tags TEXT',
+                table: 'call_templates',
+                column: 'tags',
                 ignoreErrors: ['duplicate column']
             },
             {
                 name: 'add_call_templates_variant',
                 sql: 'ALTER TABLE call_templates ADD COLUMN variant TEXT',
+                table: 'call_templates',
+                column: 'variant',
                 ignoreErrors: ['duplicate column']
             },
             {
                 name: 'add_call_templates_is_favorite',
                 sql: 'ALTER TABLE call_templates ADD COLUMN is_favorite INTEGER DEFAULT 0',
+                table: 'call_templates',
+                column: 'is_favorite',
                 ignoreErrors: ['duplicate column']
             },
             {
@@ -172,37 +210,63 @@ class EnhancedDatabase {
             {
                 name: 'add_webhook_notifications_payload',
                 sql: 'ALTER TABLE webhook_notifications ADD COLUMN payload TEXT',
+                table: 'webhook_notifications',
+                column: 'payload',
                 ignoreErrors: ['duplicate column']
             },
             {
                 name: 'add_call_inputs_digits_len',
                 sql: 'ALTER TABLE call_inputs ADD COLUMN digits_len INTEGER',
+                table: 'call_inputs',
+                column: 'digits_len',
                 ignoreErrors: ['duplicate column']
             },
             {
                 name: 'add_call_inputs_retry_count',
                 sql: 'ALTER TABLE call_inputs ADD COLUMN retry_count INTEGER DEFAULT 0',
+                table: 'call_inputs',
+                column: 'retry_count',
                 ignoreErrors: ['duplicate column']
             },
             {
                 name: 'add_call_inputs_updated_at',
                 sql: 'ALTER TABLE call_inputs ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                table: 'call_inputs',
+                column: 'updated_at',
                 ignoreErrors: ['duplicate column']
             },
             {
                 name: 'add_call_inputs_is_valid',
                 sql: 'ALTER TABLE call_inputs ADD COLUMN is_valid INTEGER DEFAULT 1',
+                table: 'call_inputs',
+                column: 'is_valid',
                 ignoreErrors: ['duplicate column']
             },
             {
                 name: 'add_call_inputs_label',
                 sql: 'ALTER TABLE call_inputs ADD COLUMN label TEXT',
+                table: 'call_inputs',
+                column: 'label',
                 ignoreErrors: ['duplicate column']
             }
         ];
 
         for (const migration of migrations) {
             try {
+                if (migration.table && migration.column) {
+                    const exists = await this.columnExists(migration.table, migration.column);
+                    if (exists) {
+                        console.log(`ℹ️ Skipping ${migration.name}: column ${migration.column} already exists on ${migration.table}`);
+                        continue;
+                    }
+
+                    const hasTable = await this.tableExists(migration.table);
+                    if (!hasTable) {
+                        console.log(`ℹ️ Skipping ${migration.name}: table ${migration.table} does not exist yet`);
+                        continue;
+                    }
+                }
+
                 await this.execute(
                     migration.sql,
                     `migration failed [${migration.name}]`,
@@ -2140,21 +2204,40 @@ class EnhancedDatabase {
            {
                sql: 'ALTER TABLE sms_messages ADD COLUMN template_name TEXT',
                context: 'add template_name column to sms_messages',
+               table: 'sms_messages',
+               column: 'template_name',
                ignoreErrors: ['duplicate column name']
            },
            {
                sql: 'ALTER TABLE sms_messages ADD COLUMN template_variables TEXT',
                context: 'add template_variables column to sms_messages',
+               table: 'sms_messages',
+               column: 'template_variables',
                ignoreErrors: ['duplicate column name']
            },
            {
                sql: 'ALTER TABLE sms_templates ADD COLUMN updated_by TEXT',
                context: 'add updated_by column to sms_templates',
+               table: 'sms_templates',
+               column: 'updated_by',
                ignoreErrors: ['duplicate column name', 'no such table']
            }
        ];
 
        for (const alteration of alterations) {
+           if (alteration.table && alteration.column) {
+               const exists = await this.columnExists(alteration.table, alteration.column);
+               if (exists) {
+                   console.log(`ℹ️ Skipping ${alteration.context}: column ${alteration.column} already exists on ${alteration.table}`);
+                   continue;
+               }
+
+               const hasTable = await this.tableExists(alteration.table);
+               if (!hasTable) {
+                   console.log(`ℹ️ Skipping ${alteration.context}: table ${alteration.table} does not exist yet`);
+                   continue;
+               }
+           }
            await this.execute(alteration.sql, alteration.context, { ignoreErrors: alteration.ignoreErrors });
        }
 
