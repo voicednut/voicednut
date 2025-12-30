@@ -97,6 +97,27 @@ class EnhancedDatabase {
         });
     }
 
+    async backfillCallInputsTimestamps() {
+        const hasCreated = await this.columnExists('call_inputs', 'created_at');
+        const hasUpdated = await this.columnExists('call_inputs', 'updated_at');
+
+        if (hasCreated) {
+            await this.execute(
+                `UPDATE call_inputs SET created_at = COALESCE(created_at, captured_at, CURRENT_TIMESTAMP) WHERE created_at IS NULL`,
+                'backfill call_inputs.created_at',
+                { ignoreErrors: ['no such table', 'no such column'] }
+            );
+        }
+
+        if (hasUpdated) {
+            await this.execute(
+                `UPDATE call_inputs SET updated_at = COALESCE(updated_at, captured_at, CURRENT_TIMESTAMP) WHERE updated_at IS NULL`,
+                'backfill call_inputs.updated_at',
+                { ignoreErrors: ['no such table', 'no such column'] }
+            );
+        }
+    }
+
     async runMigrations() {
         const migrations = [
             {
@@ -244,14 +265,14 @@ class EnhancedDatabase {
             },
             {
                 name: 'add_call_inputs_created_at',
-                sql: 'ALTER TABLE call_inputs ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                sql: 'ALTER TABLE call_inputs ADD COLUMN created_at DATETIME',
                 table: 'call_inputs',
                 column: 'created_at',
                 ignoreErrors: ['duplicate column']
             },
             {
                 name: 'add_call_inputs_updated_at',
-                sql: 'ALTER TABLE call_inputs ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                sql: 'ALTER TABLE call_inputs ADD COLUMN updated_at DATETIME',
                 table: 'call_inputs',
                 column: 'updated_at',
                 ignoreErrors: ['duplicate column']
@@ -467,6 +488,9 @@ class EnhancedDatabase {
                 throw error;
             }
         }
+
+        // Backfill call_inputs timestamps if missing
+        await this.backfillCallInputsTimestamps();
     }
 
     async initialize() {
@@ -1560,17 +1584,18 @@ class EnhancedDatabase {
             digits_len = null,
             retry_count = 0,
             updated_at = new Date().toISOString(),
+            created_at = new Date().toISOString(),
             is_valid = 1,
             label = null
         } = entry;
 
         return new Promise((resolve, reject) => {
             const stmt = this.db.prepare(`
-                INSERT INTO call_inputs (call_sid, step, input_type, value, label, confidence, digits_len, retry_count, is_valid, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO call_inputs (call_sid, step, input_type, value, label, confidence, digits_len, retry_count, is_valid, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `);
 
-            stmt.run([call_sid, step, input_type, value, label, confidence, digits_len, retry_count, is_valid, updated_at], function(err) {
+            stmt.run([call_sid, step, input_type, value, label, confidence, digits_len, retry_count, is_valid, created_at, updated_at], function(err) {
                 if (err) {
                     reject(err);
                 } else {

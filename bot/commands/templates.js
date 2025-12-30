@@ -64,8 +64,6 @@ async function templatesApiRequest(options) {
     const retriable =
       !options._retried &&
       config.apiUrl &&
-      config.templatesApiUrl &&
-      config.apiUrl !== config.templatesApiUrl &&
       (error.code === 'ECONNREFUSED' ||
         error.code === 'ENOTFOUND' ||
         error.code === 'EHOSTUNREACH' ||
