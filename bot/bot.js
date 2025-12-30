@@ -58,7 +58,7 @@ function maskDigitsPreview(value) {
     return `${'•'.repeat(str.length - 2)}${last}`;
 }
 
-function buildHeaderMessage(payload, callSid) {
+function buildHeaderMessage(payload) {
     const lines = [];
     const to = payload.to || payload.number || '';
     const from = payload.from || '';
@@ -66,8 +66,7 @@ function buildHeaderMessage(payload, callSid) {
     const template = payload.template || payload.script || 'Custom';
     const status = (payload.status || 'queued').toLowerCase();
     lines.push(`📞 Calling ${to}${from ? ` from ${from}` : ''}`);
-    lines.push(`🧾 Type: ${callType}  •  Script: ${template}`);
-    lines.push(`🆔 Call SID: ${callSid}`);
+    lines.push(`🧾 Type: ${callType} • Template: ${template}`);
     lines.push(`📶 Status: ${status}`);
     return lines.join('\n');
 }
@@ -87,6 +86,25 @@ function buildInlineKeyboard(callSid) {
     };
 }
 
+function formatDurationSeconds(seconds) {
+    if (!seconds && seconds !== 0) return 'N/A';
+    const s = Number(seconds) || 0;
+    const mins = Math.floor(s / 60);
+    const rem = s % 60;
+    if (mins === 0) return `${rem}s`;
+    return `${mins}m ${rem}s`;
+}
+
+async function fetchCallBundle(callSid) {
+    try {
+        const response = await axios.get(`${config.apiUrl}/api/calls/${callSid}`, { timeout: 12000 });
+        return response.data || {};
+    } catch (error) {
+        console.error('Call bundle fetch error:', error.message);
+        return null;
+    }
+}
+
 // Styled call event renderer
 function formatCallEvent(event) {
     const type = event.notification_type;
@@ -100,46 +118,46 @@ function formatCallEvent(event) {
     };
 
     const statusMap = {
-        call_initiated: '📤 Call initiated.',
-        call_ringing: '🔔 Phone is ringing…',
-        call_answered: '✅ Call has been answered.',
-        call_in_progress: '🟢 Call in progress.',
-        call_ended: '🏁 Call has ended.',
-        busy: '🚫 Line is busy.',
-        failed: '❌ Call failed to connect.',
-        canceled: '⚠️ Call was canceled.',
-        'no-answer': '⏳ No answer.',
-        initiated: '📤 Call initiated.',
-        ringing: '🔔 Phone is ringing…',
-        answered: '✅ Call has been answered.',
-        'in-progress': '🟢 Call in progress.',
-        completed: '🏁 Call has ended.'
+        call_initiated: '📤 Call initiated',
+        call_ringing: '🔔 Ringing…',
+        call_answered: '✅ Answered',
+        call_in_progress: '🟢 In progress',
+        call_ended: '🏁 Completed',
+        busy: '🚫 Busy',
+        failed: '❌ Failed',
+        canceled: '⚠️ Canceled',
+        'no-answer': '⏳ No answer',
+        initiated: '📤 Call initiated',
+        ringing: '🔔 Ringing…',
+        answered: '✅ Answered',
+        'in-progress': '🟢 In progress',
+        completed: '🏁 Completed'
     };
 
     if (type === 'call_initiated') {
-        message.text = buildHeaderMessage(payload, callSid);
+        message.text = buildHeaderMessage(payload);
+        message.replyMarkup = buildInlineKeyboard(callSid);
         return message;
     }
 
     if (type === 'call_ended') {
         const finalStatus = (payload.status || '').toLowerCase();
-        message.text = statusMap[finalStatus] || statusMap[type] || '🏁 Call has ended.';
-        message.replyMarkup = buildInlineKeyboard(callSid);
+        message.text = statusMap[finalStatus] || statusMap[type] || '🏁 Completed';
         return message;
     }
 
     if (statusMap[type]) {
-        message.text = statusMap[type];
+        message.text = statusMap[type].replace(/\.$/, '');
         return message;
     }
 
     if (type === 'call_human_detected') {
-        message.text = '👤 Human detected.';
+        message.text = '👤 Human detected';
         return message;
     }
 
     if (type === 'call_machine_detected') {
-        message.text = '🤖 Voicemail / machine detected.';
+        message.text = '🤖 Machine/voicemail detected';
         return message;
     }
 
@@ -288,13 +306,15 @@ const lastSentByCall = new Map();
 const lastSentAtByCall = new Map();
 const lastCallbackTimeByUser = new Map();  // NEW: Track last callback time for debouncing
 const CALLBACK_DEBOUNCE_MS = 800;  // NEW: Debounce rapid callbacks to 800ms
+const callSendQueues = new Map(); // call_sid -> { queue: [], sending: false, lastStatus: '' }
+const SEQUENTIAL_DELAY_MS = 200;
 
 async function sendHeaderIfMissing(notif, payload) {
     const existingThread = await getCallThread(notif.call_sid);
     if (existingThread && existingThread.telegram_chat_id === notif.telegram_chat_id) {
         return existingThread.message_id;
     }
-    const headerText = buildHeaderMessage(payload || {}, notif.call_sid);
+    const headerText = buildHeaderMessage(payload || {});
     const sent = await bot.api.sendMessage(notif.telegram_chat_id, headerText, {
         parse_mode: 'HTML',
         protect_content: true,
@@ -302,6 +322,59 @@ async function sendHeaderIfMissing(notif, payload) {
     });
     await upsertCallThread(notif.call_sid, notif.telegram_chat_id, sent.message_id);
     return sent.message_id;
+}
+
+async function enqueueNotificationSend(notif, formatted) {
+    const callSid = notif.call_sid;
+    if (!callSendQueues.has(callSid)) {
+        callSendQueues.set(callSid, { queue: [], sending: false, lastStatus: '' });
+    }
+    const queue = callSendQueues.get(callSid);
+
+    const statusText = formatted.text.trim();
+    if (queue.lastStatus === statusText) {
+        await markNotification(notif.id, 'sent', null, 'deduped');
+        return;
+    }
+
+    queue.queue.push({ notif, formatted });
+    if (!queue.sending) {
+        processQueue(callSid);
+    }
+}
+
+async function processQueue(callSid) {
+    const queue = callSendQueues.get(callSid);
+    if (!queue || queue.sending) return;
+    const next = queue.queue.shift();
+    if (!next) {
+        queue.sending = false;
+        return;
+    }
+
+    queue.sending = true;
+    const { notif, formatted } = next;
+    const payload = parsePayload(notif.payload);
+
+    try {
+        const headerId = await sendHeaderIfMissing(notif, payload);
+        const sendOptions = {
+            parse_mode: 'HTML',
+            protect_content: formatted.protect !== false,
+            reply_markup: formatted.replyMarkup || undefined,
+            reply_to_message_id: headerId,
+            allow_sending_without_reply: true
+        };
+        await bot.api.sendMessage(notif.telegram_chat_id, formatted.text, sendOptions);
+        queue.lastStatus = formatted.text.trim();
+        await markNotification(notif.id, 'sent', headerId, null);
+    } catch (error) {
+        console.error('Failed to send notification', notif.id, error.message);
+        await markNotification(notif.id, 'failed', null, error.message);
+    } finally {
+        queue.sending = false;
+        setTimeout(() => processQueue(callSid), SEQUENTIAL_DELAY_MS);
+    }
 }
 
 async function processPendingNotifications() {
@@ -315,41 +388,7 @@ async function processPendingNotifications() {
                 continue;
             }
             try {
-                const now = Date.now();
-                const lastType = lastSentByCall.get(notif.call_sid);
-                const lastTs = lastSentAtByCall.get(notif.call_sid) || 0;
-                if (lastType === notif.notification_type && now - lastTs < 500) {
-                    await markNotification(notif.id, 'sent', null, 'debounced');
-                    continue;
-                }
-                const existingThread = await getCallThread(notif.call_sid);
-                let messageId = null;
-                const sendOptions = {
-                    parse_mode: 'HTML',
-                    protect_content: protect !== false,
-                    reply_markup: replyMarkup || undefined
-                };
-                if (existingThread && existingThread.telegram_chat_id === notif.telegram_chat_id) {
-                    await bot.api.sendMessage(notif.telegram_chat_id, text, {
-                        ...sendOptions,
-                        reply_to_message_id: existingThread.message_id,
-                        allow_sending_without_reply: true
-                    });
-                    messageId = existingThread.message_id;
-                } else {
-                    const payload = parsePayload(notif.payload);
-                    const headerId = await sendHeaderIfMissing(notif, payload);
-                    const sent = await bot.api.sendMessage(notif.telegram_chat_id, text, {
-                        ...sendOptions,
-                        reply_to_message_id: headerId,
-                        allow_sending_without_reply: true
-                    });
-                    messageId = headerId;
-                    await upsertCallThread(notif.call_sid, notif.telegram_chat_id, headerId);
-                }
-                await markNotification(notif.id, 'sent', messageId, null);
-                lastSentByCall.set(notif.call_sid, notif.notification_type);
-                lastSentAtByCall.set(notif.call_sid, now);
+                await enqueueNotificationSend(notif, { text, replyMarkup, protect, chatId });
             } catch (error) {
                 console.error('Failed to send notification', notif.id, error.message);
                 await markNotification(notif.id, 'failed', null, error.message);
@@ -811,6 +850,118 @@ bot.on('callback_query', async (ctx, next) => {
         const userId = ctx.from.id.toString();
         const now = Date.now();
         
+        // Handle transcript/timeline/details buttons (tx)
+        if (action.startsWith('tx:')) {
+            const [, kind, callSid] = action.split(':');
+            const thread = await getCallThread(callSid);
+            const replyId = thread?.message_id;
+
+            const bundle = await fetchCallBundle(callSid);
+            if (!bundle || !bundle.call) {
+                await bot.api.sendMessage(ctx.chat.id, 'Not available yet — try again shortly.', {
+                    reply_to_message_id: replyId || undefined,
+                    allow_sending_without_reply: true
+                });
+                return;
+            }
+
+            const { call, transcripts = [], webhook_notifications: webhooks = [] } = bundle;
+
+            if (kind === 'view') {
+                if (!transcripts.length) {
+                    await bot.api.sendMessage(ctx.chat.id, '📝 Transcript not ready yet — try again shortly.', {
+                        reply_to_message_id: replyId || undefined,
+                        allow_sending_without_reply: true
+                    });
+                    return;
+                }
+                const maxMessages = 8;
+                let transcriptMessage = `📝 Transcript (latest)\n\n`;
+                transcripts.slice(0, maxMessages).forEach((entry) => {
+                    const speaker = entry.speaker === 'user' ? '👤 Caller' : '🤖 AI';
+                    const snippet = entry.message.slice(0, 180);
+                    transcriptMessage += `${speaker}: ${snippet}${entry.message.length > 180 ? '…' : ''}\n\n`;
+                });
+                if (transcripts.length > maxMessages) {
+                    transcriptMessage += `… ${transcripts.length - maxMessages} more messages\n\n`;
+                }
+                transcriptMessage += `Full transcript: /transcript ${callSid}`;
+
+                await bot.api.sendMessage(ctx.chat.id, transcriptMessage, {
+                    reply_to_message_id: replyId || undefined,
+                    allow_sending_without_reply: true
+                });
+                return;
+            }
+
+            if (kind === 'audio') {
+                const url = call.recording_url || call.recording || call.audio_url;
+                const text = url
+                    ? `🎧 Recording:\n${url}`
+                    : 'Not available yet — try again shortly.';
+                await bot.api.sendMessage(ctx.chat.id, text, {
+                    reply_to_message_id: replyId || undefined,
+                    allow_sending_without_reply: true
+                });
+                return;
+            }
+
+            if (kind === 'timeline') {
+                if (!webhooks || !webhooks.length) {
+                    await bot.api.sendMessage(ctx.chat.id, 'Not available yet — try again shortly.', {
+                        reply_to_message_id: replyId || undefined,
+                        allow_sending_without_reply: true
+                    });
+                    return;
+                }
+                const recent = webhooks.slice(0, 12);
+                const map = {
+                    call_initiated: '📤 initiated',
+                    call_ringing: '🔔 ringing',
+                    call_answered: '✅ answered',
+                    call_in_progress: '🟢 in progress',
+                    call_ended: '🏁 completed',
+                    busy: '🚫 busy',
+                    failed: '❌ failed',
+                    canceled: '⚠️ canceled',
+                    'no-answer': '⏳ no answer'
+                };
+                const lines = recent.map((n) => {
+                    const label = map[n.notification_type] || n.notification_type;
+                    return `${label} • ${n.created_at}`;
+                });
+                const text = `📊 Timeline\n\n${lines.join('\n')}`;
+                await bot.api.sendMessage(ctx.chat.id, text, {
+                    reply_to_message_id: replyId || undefined,
+                    allow_sending_without_reply: true
+                });
+                return;
+            }
+
+            if (kind === 'details') {
+                const duration = formatDurationSeconds(call.duration);
+                const text = [
+                    `ℹ️ Call details`,
+                    `To: ${call.phone_number || 'Unknown'}`,
+                    `Status: ${call.status || 'unknown'}`,
+                    `Duration: ${duration}`,
+                    `Provider: ${call.provider || 'twilio'}`,
+                    `Created: ${call.created_at || ''}`
+                ].join('\n');
+                await bot.api.sendMessage(ctx.chat.id, text, {
+                    reply_to_message_id: replyId || undefined,
+                    allow_sending_without_reply: true
+                });
+                return;
+            }
+
+            await bot.api.sendMessage(ctx.chat.id, 'Not available yet — try again shortly.', {
+                reply_to_message_id: replyId || undefined,
+                allow_sending_without_reply: true
+            });
+            return;
+        }
+
         // NEW: Debounce rapid button clicks (prevent duplicate commands)
         const lastCallbackTime = lastCallbackTimeByUser.get(userId) || 0;
         if (now - lastCallbackTime < CALLBACK_DEBOUNCE_MS) {

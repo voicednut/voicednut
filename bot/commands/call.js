@@ -670,7 +670,7 @@ async function callFlow(conversation, ctx) {
         '✅ *Call Placed Successfully!*',
         '',
         `📞 To: ${data.to}`,
-        `🆔 Call SID: \`${data.call_sid}\``,
+        `🧾 Type: ${payload.call_type || payload.type || 'Service Call'}`,
         `📊 Status: ${data.status}`
       ].join('\n');
 
