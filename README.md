@@ -5,7 +5,7 @@
 [![Telegram](https://img.shields.io/badge/Telegram-Bot-blue.svg)](https://core.telegram.org/bots)
 [![Twilio](https://img.shields.io/badge/Twilio-API-red.svg)](https://www.twilio.com/)
 
-A comprehensive Telegram bot system for making AI-powered voice calls using Twilio, OpenRouter APIs, and real-time transcription with Deepgram.
+A comprehensive Telegram bot system for making AI-powered voice calls using Twilio, OpenRouter APIs, and real-time transcription with Deepgram..
 
 ## 🌟 Features
 
