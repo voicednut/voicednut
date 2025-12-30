@@ -45,6 +45,7 @@ function nonJsonResponseError(endpoint, response) {
 
 async function templatesApiRequest(options) {
   const endpoint = `${(options.method || 'GET').toUpperCase()} ${options.url}`;
+  const attempt = options._retried ? 'fallback' : 'primary';
   try {
     const response = await templatesApi.request(options);
     const contentType = response.headers?.['content-type'] || '';
@@ -60,13 +61,46 @@ async function templatesApiRequest(options) {
     }
     return response.data;
   } catch (error) {
+    const retriable =
+      !options._retried &&
+      config.apiUrl &&
+      config.templatesApiUrl &&
+      config.apiUrl !== config.templatesApiUrl &&
+      (error.code === 'ECONNREFUSED' ||
+        error.code === 'ENOTFOUND' ||
+        error.code === 'EHOSTUNREACH' ||
+        error.request);
+
+    if (retriable) {
+      // Retry once against API_URL as fallback
+      try {
+        const fallbackClient = axios.create({ baseURL: config.apiUrl, timeout: 10000 });
+        const response = await fallbackClient.request({ ...options, _retried: true });
+        const contentType = response.headers?.['content-type'] || '';
+        if (!contentType.includes('application/json')) {
+          throw nonJsonResponseError(endpoint, response);
+        }
+        if (response.data && response.data.success === false) {
+          const apiError = new Error(response.data.error || 'Templates API reported failure');
+          apiError.isTemplatesApiError = true;
+          apiError.reason = 'api_failure';
+          apiError.endpoint = endpoint;
+          throw apiError;
+        }
+        return response.data;
+      } catch (fallbackErr) {
+        fallbackErr.templatesApi = { endpoint, attempt };
+        throw fallbackErr;
+      }
+    }
+
     if (error.response) {
       const contentType = error.response.headers?.['content-type'] || '';
       if (!contentType.includes('application/json')) {
         throw nonJsonResponseError(endpoint, error.response);
       }
     }
-    error.templatesApi = { endpoint };
+    error.templatesApi = { endpoint, attempt };
     throw error;
   }
 }
