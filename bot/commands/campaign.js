@@ -435,7 +435,7 @@ async function dncManagementFlow(conversation, ctx) {
   }
 }
 
-function registerCampaignCommand(bot) {
+function registerCampaignCommand(bot, allowedChatIds = new Set()) {
   // Register campaign conversation
   bot.use(conversations());
   bot.use(createConversation(campaignFlow, 'campaign_flow'));
@@ -444,8 +444,7 @@ function registerCampaignCommand(bot) {
   bot.command('campaign', async (ctx) => {
     try {
       // Check if user is authorized
-      const allowedChatIds = process.env.ALLOWED_TELEGRAM_IDS?.split(',') || [];
-      if (!allowedChatIds.includes(ctx.chat.id.toString())) {
+      if (!allowedChatIds.has(ctx.chat.id.toString())) {
         return ctx.reply('❌ You do not have permission to use this command');
       }
 

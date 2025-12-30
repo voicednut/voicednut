@@ -6,6 +6,14 @@ const dbPath = path.resolve(__dirname, '../db/data.db');
 const db = new sqlite3.Database(dbPath);
 
 const { userId, username } = require('../config').admin;
+const allowedChatIds = new Set(
+  [
+    userId,
+    ...(process.env.ALLOWED_TELEGRAM_IDS ? process.env.ALLOWED_TELEGRAM_IDS.split(',') : [])
+  ]
+    .filter(Boolean)
+    .map((id) => id.toString().trim())
+);
 
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (
@@ -29,9 +37,26 @@ db.serialize(() => {
 });
 
 function getUser(id, cb) {
+  const idStr = id?.toString();
   db.get(`SELECT * FROM users WHERE telegram_id = ?`, [id], (e, r) => {
     if (e) return cb(null);
-    cb(r);
+    if (r) return cb(r);
+
+    // Auto-provision allowed chat IDs (admin list) as ADMIN to unblock buttons/commands
+    if (allowedChatIds.has(idStr)) {
+      const fallbackUsername = username || null;
+      db.run(
+        `INSERT OR IGNORE INTO users (telegram_id, username, role) VALUES (?, ?, 'ADMIN')`,
+        [Number(idStr), fallbackUsername],
+        (err) => {
+          if (err) return cb(null);
+          cb({ telegram_id: Number(idStr), username: fallbackUsername, role: 'ADMIN' });
+        }
+      );
+      return;
+    }
+
+    cb(null);
   });
 }
 function addUser(id, username, role = 'USER', cb = () => {}) {

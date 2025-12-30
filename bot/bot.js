@@ -448,7 +448,7 @@ registerSmsCommands(bot);
 registerTemplatesCommand(bot);
 registerUserListCommand(bot);
 registerPersonaCommand(bot);
-registerCampaignCommand(bot);
+registerCampaignCommand(bot, allowedChatIds);
 
 
 // Register non-conversation commands
@@ -1502,6 +1502,7 @@ const TELEGRAM_COMMANDS = [
     { command: 'cancel', description: 'Cancel the current action' },
     { command: 'menu', description: 'Show quick action menu' },
     { command: 'health', description: 'Check bot and API health' },
+    { command: 'campaign', description: 'Manage call campaigns (admin only)' },
     { command: 'bulksms', description: 'Send bulk SMS (admin only)' },
     { command: 'schedulesms', description: 'Schedule SMS message' },
     { command: 'provider', description: 'Manage call provider (admin only)' },
