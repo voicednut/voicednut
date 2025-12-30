@@ -229,13 +229,6 @@ class EnhancedDatabase {
                 ignoreErrors: ['duplicate column']
             },
             {
-                name: 'add_call_inputs_updated_at',
-                sql: 'ALTER TABLE call_inputs ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
-                table: 'call_inputs',
-                column: 'updated_at',
-                ignoreErrors: ['duplicate column']
-            },
-            {
                 name: 'add_call_inputs_is_valid',
                 sql: 'ALTER TABLE call_inputs ADD COLUMN is_valid INTEGER DEFAULT 1',
                 table: 'call_inputs',
@@ -247,6 +240,20 @@ class EnhancedDatabase {
                 sql: 'ALTER TABLE call_inputs ADD COLUMN label TEXT',
                 table: 'call_inputs',
                 column: 'label',
+                ignoreErrors: ['duplicate column']
+            },
+            {
+                name: 'add_call_inputs_created_at',
+                sql: 'ALTER TABLE call_inputs ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                table: 'call_inputs',
+                column: 'created_at',
+                ignoreErrors: ['duplicate column']
+            },
+            {
+                name: 'add_call_inputs_updated_at',
+                sql: 'ALTER TABLE call_inputs ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                table: 'call_inputs',
+                column: 'updated_at',
                 ignoreErrors: ['duplicate column']
             },
             // Campaign tables
@@ -551,6 +558,7 @@ class EnhancedDatabase {
                 retry_count INTEGER DEFAULT 0,
                 is_valid INTEGER DEFAULT 1,
                 captured_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(call_sid) REFERENCES calls(call_sid)
             )`,
