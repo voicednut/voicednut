@@ -59,28 +59,31 @@ function maskDigitsPreview(value) {
 }
 
 function buildHeaderMessage(payload) {
-    const lines = [];
     const to = payload.to || payload.number || '';
-    const from = payload.from || '';
     const callType = payload.call_type || payload.type || 'Call';
     const template = payload.template || payload.script || 'Custom';
-    const status = (payload.status || 'queued').toLowerCase();
-    lines.push(`📞 Calling ${to}${from ? ` from ${from}` : ''}`);
-    lines.push(`🧾 Type: ${callType} • Template: ${template}`);
-    lines.push(`📶 Status: ${status}`);
-    return lines.join('\n');
+    
+    const typeLabel = callType === 'OTP' ? '🔐 OTP' : callType === 'Campaign' ? '📢 Campaign' : '📞 Voice';
+    const templateLabel = template && template !== 'Custom' ? `\n📋 <b>${template}</b>` : '';
+    
+    return (
+        `📞 <b>Call in Progress</b>\n\n` +
+        `To: <b>${to}</b>\n` +
+        `Type: ${typeLabel}${templateLabel}\n\n` +
+        `Status updates below…`
+    );
 }
 
 function buildInlineKeyboard(callSid) {
     return {
         inline_keyboard: [
             [
-                { text: '📝 View transcript', callback_data: `tx:view:${callSid}` },
-                { text: '🎧 Transcript audio', callback_data: `tx:audio:${callSid}` }
+                { text: '📝 Transcript', callback_data: `transcript:${callSid}` },
+                { text: '🎧 Recording', callback_data: `recording:${callSid}` }
             ],
             [
-                { text: '📊 Call timeline', callback_data: `tx:timeline:${callSid}` },
-                { text: 'ℹ️ Call details', callback_data: `tx:details:${callSid}` }
+                { text: '📊 Timeline', callback_data: `timeline:${callSid}` },
+                { text: 'ℹ️ Details', callback_data: `details:${callSid}` }
             ]
         ]
     };
@@ -117,134 +120,136 @@ function formatCallEvent(event) {
         protect: true
     };
 
-    const statusMap = {
-        call_initiated: '📤 Call initiated',
-        call_ringing: '🔔 Ringing…',
-        call_answered: '✅ Answered',
-        call_in_progress: '🟢 In progress',
-        call_ended: '🏁 Completed',
-        busy: '🚫 Busy',
-        failed: '❌ Failed',
-        canceled: '⚠️ Canceled',
-        'no-answer': '⏳ No answer',
-        initiated: '📤 Call initiated',
-        ringing: '🔔 Ringing…',
-        answered: '✅ Answered',
-        'in-progress': '🟢 In progress',
-        completed: '🏁 Completed'
-    };
-
     if (type === 'call_initiated') {
         message.text = buildHeaderMessage(payload);
         message.replyMarkup = buildInlineKeyboard(callSid);
+        message.parse_mode = 'HTML';
         return message;
     }
 
     if (type === 'call_ended') {
         const finalStatus = (payload.status || '').toLowerCase();
-        message.text = statusMap[finalStatus] || statusMap[type] || '🏁 Completed';
-        return message;
-    }
-
-    if (statusMap[type]) {
-        message.text = statusMap[type].replace(/\.$/, '');
+        const statusMap = {
+            busy: '🚫 <b>Busy</b>',
+            failed: '❌ <b>Failed</b>',
+            'no-answer': '⏳ <b>No Answer</b>',
+            completed: '🏁 <b>Completed</b>'
+        };
+        message.text = statusMap[finalStatus] || '🏁 <b>Completed</b>';
+        if (payload.duration) {
+            const mins = Math.floor(payload.duration / 60);
+            const secs = payload.duration % 60;
+            message.text += `\n⏱️ <b>Duration:</b> ${mins}m ${secs}s`;
+        }
+        message.parse_mode = 'HTML';
         return message;
     }
 
     if (type === 'call_human_detected') {
-        message.text = '👤 Human detected';
+        message.text = '👤 <b>Human Detected</b>';
+        message.parse_mode = 'HTML';
         return message;
     }
 
     if (type === 'call_machine_detected') {
-        message.text = '🤖 Machine/voicemail detected';
+        message.text = '🤖 <b>Machine/Voicemail Detected</b>';
+        message.parse_mode = 'HTML';
         return message;
     }
 
-    if (type === 'call_input_dtmf') {
+    if (type === 'call_ringing' || type === 'ringing') {
+        message.text = '🔔 <b>Ringing…</b>';
+        message.parse_mode = 'HTML';
+        return message;
+    }
+
+    if (type === 'call_answered' || type === 'answered') {
+        message.text = '✅ <b>Answered</b>';
+        message.parse_mode = 'HTML';
+        return message;
+    }
+
+    if (type === 'call_in_progress' || type === 'in-progress') {
+        message.text = '🟢 <b>In Progress</b>';
+        message.parse_mode = 'HTML';
+        return message;
+    }
+
+    if (type === 'call_input_dtmf' || type === 'call_input_waiting') {
         const label = payload.label || payload.stage || 'Input';
-        const expectedLen = payload.expected_length ? ` (${payload.expected_length} digits)` : '';
-        message.text = `⌨️ Awaiting input: ${label}${expectedLen}`;
+        const expectedLen = payload.expected_length ? ` (<b>${payload.expected_length}</b> digits)` : '';
+        message.text = `⌨️ <b>Awaiting Input:</b> ${label}${expectedLen}`;
+        message.parse_mode = 'HTML';
         return message;
     }
 
-    if (type === 'call_step_retry') {
+    if (type === 'call_step_retry' || type === 'call_input_retry') {
         const attemptInfo =
             payload.attempts && payload.max_attempts
-                ? ` (Attempt ${payload.attempts}/${payload.max_attempts})`
+                ? ` (Attempt <b>${payload.attempts}</b>/<b>${payload.max_attempts}</b>)`
                 : '';
-        message.text = `❌ Code has been rejected.${attemptInfo}\n🔁 Re-prompting for input…`;
+        message.text = `❌ <b>Code Rejected</b>${attemptInfo}\n🔁 Re-prompting for input…`;
+        message.parse_mode = 'HTML';
         return message;
     }
 
-    if (type === 'call_step_complete') {
+    if (type === 'call_step_complete' || type === 'call_input_success') {
         const label = payload.label || payload.stage || 'Input';
         const digitsText = payload.digits_preview || maskDigitsPreview(payload.code || '');
         const len = payload.digits_length || (payload.digits_preview ? payload.digits_preview.length : null);
-        const lenText = len ? ` (len=${len})` : '';
-        message.text = `✅ ${label}: ${digitsText}${lenText}`;
-        return message;
-    }
-
-    if (type === 'call_input_waiting') {
-        const label = payload.label || 'Input';
-        const len = payload.expected_length ? ` (${payload.expected_length} digits)` : '';
-        message.text = `⌨️ Awaiting input: ${label}${len}`;
-        return message;
-    }
-
-    if (type === 'call_input_success') {
-        const label = payload.label || 'Input';
-        const len = payload.length ? ` (len=${payload.length})` : '';
-        message.text = `✅ Input received: ${label}${len}`;
-        return message;
-    }
-
-    if (type === 'call_input_retry') {
-        const attemptInfo =
-            payload.attempts && payload.max_attempts
-                ? ` (Attempt ${payload.attempts}/${payload.max_attempts})`
-                : '';
-        message.text = `❌ Rejected.${attemptInfo}\n🔁 Re-prompting for input…`;
+        const lenText = len ? ` (len=<b>${len}</b>)` : '';
+        message.text = `✅ <b>${label}:</b> ${digitsText}${lenText}`;
+        message.parse_mode = 'HTML';
         return message;
     }
 
     if (type === 'call_input_failed') {
         const attemptInfo =
             payload.attempts && payload.max_attempts
-                ? ` (Attempt ${payload.attempts}/${payload.max_attempts})`
+                ? ` (Attempt <b>${payload.attempts}</b>/<b>${payload.max_attempts}</b>)`
                 : '';
-        message.text = `❌ Input failed.${attemptInfo}`;
+        message.text = `❌ <b>Input Failed</b>${attemptInfo}`;
+        message.parse_mode = 'HTML';
         return message;
     }
 
     if (type === 'call_final_outcome') {
         const success = Boolean(payload.success);
         const reason = payload.reason || payload.finalStatus || 'unknown';
-        message.text = success
-            ? '✅ Completed successfully.'
-            : `❌ Not completed: ${reason}.`;
+        const icon = success ? '🏁' : '❌';
+        const statusText = success ? '<b>Completed Successfully</b>' : `<b>Not Completed:</b> ${reason}`;
+        message.text = `${icon} ${statusText}`;
+        if (payload.duration) {
+            const mins = Math.floor(payload.duration / 60);
+            const secs = payload.duration % 60;
+            message.text += `\n⏱️ <b>Duration:</b> ${mins}m ${secs}s`;
+        }
         message.replyMarkup = buildInlineKeyboard(callSid);
+        message.parse_mode = 'HTML';
         return message;
     }
 
     if (type === 'otp_accepted') {
         const codePreview = payload.code || maskDigitsPreview(payload.code);
         const len = payload.length || (codePreview ? String(codePreview).replace(/•/g, '').length : null);
-        message.text = `🔑 Code has been accepted.${len ? ` (len=${len})` : ''}`;
+        message.text = `🔑 <b>Code Accepted</b>${len ? ` (len=<b>${len}</b>)` : ''}`;
+        message.parse_mode = 'HTML';
         return message;
     }
 
     if (type === 'otp_rejected') {
         const attemptInfo =
             payload.attempts && payload.max
-                ? ` (Attempt ${payload.attempts}/${payload.max})`
+                ? ` (Attempt <b>${payload.attempts}</b>/<b>${payload.max}</b>)`
                 : '';
-        message.text = `❌ Code has been rejected.${attemptInfo}`;
+        message.text = `❌ <b>Code Rejected</b>${attemptInfo}`;
+        message.parse_mode = 'HTML';
         return message;
     }
 
-    message.text = `ℹ️ ${type.replace(/_/g, ' ')}`;
+    // Default case for unknown event types
+    message.text = `ℹ️ <b>${type.replace(/_/g, ' ')}</b>`;
+    message.parse_mode = 'HTML';
     return message;
 }
 

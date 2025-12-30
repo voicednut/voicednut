@@ -336,7 +336,7 @@ async function createPersonaFlow(conversation, ctx, ensureActive) {
 
   try {
     const response = await createPersona(ctx, ensureActive, payload);
-    await ctx.reply(`✅ Persona *${response.persona.label}* created.`, { parse_mode: 'Markdown' });
+    await ctx.reply(`✅ <b>Persona Created</b>\n\n${response.persona.label}`, { parse_mode: 'HTML' });
     invalidatePersonaCache();
     await getBusinessOptions(true);
   } catch (error) {
@@ -463,7 +463,7 @@ async function editPersonaFlow(conversation, ctx, ensureActive, persona) {
 
   try {
     const response = await updatePersona(ctx, ensureActive, persona.slug, updates);
-    await ctx.reply(`✅ Persona *${response.persona.label}* updated.`, { parse_mode: 'Markdown' });
+    await ctx.reply(`✅ <b>Persona Updated</b>\n\n${response.persona.label}`, { parse_mode: 'HTML' });
     invalidatePersonaCache();
     await getBusinessOptions(true);
   } catch (error) {
@@ -488,7 +488,7 @@ async function deletePersonaFlow(conversation, ctx, ensureActive, persona) {
 
   try {
     await deletePersona(ctx, ensureActive, persona.slug);
-    await ctx.reply(`🗑️ Persona *${persona.label}* deleted.`, { parse_mode: 'Markdown' });
+    await ctx.reply(`🗑️ <b>Persona Deleted</b>\n\n${persona.label}`, { parse_mode: 'HTML' });
     invalidatePersonaCache();
     await getBusinessOptions(true);
   } catch (error) {

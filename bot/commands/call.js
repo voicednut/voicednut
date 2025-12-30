@@ -666,15 +666,14 @@ async function callFlow(conversation, ctx) {
 
     const data = response?.data;
     if (data?.success && data.call_sid) {
-      const successMsg = [
-        '✅ *Call Placed Successfully!*',
-        '',
-        `📞 To: ${data.to}`,
-        `🧾 Type: ${payload.call_type || payload.type || 'Service Call'}`,
-        `📊 Status: ${data.status}`
-      ].join('\n');
+      const typeLabel = payload.call_type === 'OTP' ? '🔐 OTP' : payload.call_type === 'Campaign' ? '📢 Campaign' : '📞 Voice';
+      const successMsg = 
+        `✅ <b>Call Placed Successfully!</b>\n\n` +
+        `To: <b>${data.to}</b>\n` +
+        `Type: ${typeLabel}\n` +
+        `Status: <b>${data.status || 'queued'}</b>`;
 
-      await ctx.reply(successMsg, { parse_mode: 'Markdown' });
+      await ctx.reply(successMsg, { parse_mode: 'HTML' });
       flow.touch('completed');
       if (ctx.session?.wizardCategory) {
         await setWizardCallSid(ctx.from.id, ctx.chat.id, data.call_sid);
@@ -957,13 +956,10 @@ async function otpFlow(conversation, ctx) {
 
     if (response.data?.success && response.data.call_sid) {
       await ctx.reply(
-        [
-          '✅ OTP call placed.',
-          `📞 To: ${response.data.to}`,
-          `🆔 Call SID: \`${response.data.call_sid}\``,
-          `📊 Status: ${response.data.status || 'initiated'}`,
-        ].join('\n'),
-        { parse_mode: 'Markdown' }
+        `✅ <b>OTP Call Placed</b>\n\n` +
+        `To: <b>${response.data.to}</b>\n` +
+        `Status: <b>${response.data.status || 'initiated'}</b>`,
+        { parse_mode: 'HTML' }
       );
     } else {
       await ctx.reply('⚠️ Call sent but response was unexpected. Check logs.');
@@ -1138,13 +1134,10 @@ async function paymentFlow(conversation, ctx) {
 
     if (response.data?.success && response.data.call_sid) {
       await ctx.reply(
-        [
-          '✅ Payment call placed.',
-          `📞 To: ${response.data.to}`,
-          `🆔 Call SID: \`${response.data.call_sid}\``,
-          `📊 Status: ${response.data.status || 'initiated'}`,
-        ].join('\n'),
-        { parse_mode: 'Markdown' }
+        `✅ <b>Payment Call Placed</b>\n\n` +
+        `To: <b>${response.data.to}</b>\n` +
+        `Status: <b>${response.data.status || 'initiated'}</b>`,
+        { parse_mode: 'HTML' }
       );
     } else {
       await ctx.reply('⚠️ Payment call sent but response was unexpected. Check logs.');

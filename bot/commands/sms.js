@@ -381,7 +381,7 @@ Tap an option below to continue.`;
                 `📤 From: ${data.from}\n\n` +
                 `🔔 You'll receive delivery notifications`;
 
-            await ctx.reply(successMsg, { parse_mode: 'Markdown' });
+            await ctx.reply(successMsg, { parse_mode: 'HTML' });
         } else {
             await ctx.reply('⚠️ SMS was sent but response format unexpected. Check logs.');
         }
@@ -516,16 +516,16 @@ async function bulkSmsFlow(conversation, ctx) {
                 `📊 Success Rate: ${Math.round((result.successful / result.total) * 100)}%\n\n` +
                 `🔔 Individual delivery reports will follow`;
 
-            await ctx.reply(successMsg, { parse_mode: 'Markdown' });
+            await ctx.reply(successMsg, { parse_mode: 'HTML' });
 
             if (result.failed > 0) {
                 const failedResults = result.results.filter(r => !r.success);
                 if (failedResults.length <= 10) {
-                    let failedMsg = '❌ *Failed Numbers:*\n\n';
+                    let failedMsg = '❌ <b>Failed Numbers:</b>\n\n';
                     failedResults.forEach(r => {
                         failedMsg += `• ${r.recipient}: ${r.error}\n`;
                     });
-                    await ctx.reply(failedMsg, { parse_mode: 'Markdown' });
+                    await ctx.reply(failedMsg, { parse_mode: 'HTML' });
                 }
             }
         } else {
@@ -662,13 +662,12 @@ async function scheduleSmsFlow(conversation, ctx) {
 
         if (data.success) {
             const successMsg =
-                `✅ *SMS Scheduled Successfully!*\n\n` +
-                `🆔 Schedule ID: \`${data.schedule_id}\`\n` +
-                `📅 Will send: ${data.scheduled_time ? new Date(data.scheduled_time).toLocaleString() : 'unknown'}\n` +
-                `📱 To: ${number}\n\n` +
+                `✅ <b>SMS Scheduled Successfully!</b>\n\n` +
+                `📅 <b>Will send:</b> ${data.scheduled_time ? new Date(data.scheduled_time).toLocaleString() : 'unknown'}\n` +
+                `📱 <b>To:</b> ${number}\n\n` +
                 `🔔 You'll receive confirmation when sent`;
 
-            await ctx.reply(successMsg, { parse_mode: 'Markdown' });
+            await ctx.reply(successMsg, { parse_mode: 'HTML' });
         }
     } catch (error) {
         if (error instanceof OperationCancelledError || error?.name === 'AbortError' || error?.name === 'CanceledError') {
