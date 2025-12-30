@@ -400,6 +400,7 @@ const { callFlow, callWizardFlow, otpFlow, paymentFlow, registerCallCommand } = 
 const { smsFlow, bulkSmsFlow, scheduleSmsFlow, registerSmsCommands } = require('./commands/sms');
 const { templatesFlow, registerTemplatesCommand } = require('./commands/templates');
 const { personaFlow, registerPersonaCommand } = require('./commands/persona');
+const { campaignFlow, registerCampaignCommand } = require('./commands/campaign');
 const {
     registerProviderCommand,
     fetchProviderStatus,
@@ -447,6 +448,7 @@ registerSmsCommands(bot);
 registerTemplatesCommand(bot);
 registerUserListCommand(bot);
 registerPersonaCommand(bot);
+registerCampaignCommand(bot);
 
 
 // Register non-conversation commands

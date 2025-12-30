@@ -31,6 +31,9 @@ const ProviderRegistry = require('./services/ProviderRegistry');
 const OtpScenarioEngine = require('./services/OtpScenarioEngine');
 const OtpRoutes = require('./routes/otp');
 const { CallHandlerFactory } = require('./handlers');
+const CampaignManager = require('./services/CampaignManager');
+const DNCChecker = require('./services/DNCChecker');
+const CampaignRoutes = require('./routes/campaigns');
 
 const VoiceResponse = require('twilio').twiml.VoiceResponse;
 
@@ -2166,6 +2169,14 @@ async function startServer() {
 
     app.use('/otp', otpRoutes.getRouter());
     console.log('✅ OTP Collection System initialized'.green);
+
+    // Initialize Campaign Management System
+    console.log('Initializing Campaign Management System...'.yellow);
+    const campaignManager = new CampaignManager(db);
+    const dncChecker = new DNCChecker(db);
+    
+    CampaignRoutes(app, { db, campaignManager, dncChecker });
+    console.log('✅ Campaign Management System initialized'.green);
 
     // Start HTTP server
     app.listen(PORT, () => {
